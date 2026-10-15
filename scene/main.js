@@ -127,6 +127,9 @@
   const layers = map.layers.filter(l => !CONFIG.hiddenLayers.includes(l.id));
   const mapW = layers[0].w * TILE, mapH = layers[0].h * TILE;
   const UNDER = ['Back', 'Buildings'];   // drawn below props and animals
+  // The Farm map puts the upper fence tiles on Front, which this renderer draws over every prop.
+  // Treat them as Buildings so farm buildings render over the fence instead of the other way around.
+  const MAP_FENCE_TILES = new Set([358, 359, 360, 361, 409]);
 
   function sheetImage(sheetIdx, s) {
     const ts = map.tilesheets[sheetIdx];
@@ -149,6 +152,7 @@
   // any later-layer tile sitting on one is drawn again on top of it.
   function bake(s) {
     const groups = [layers.filter(l => UNDER.includes(l.id)), layers.filter(l => !UNDER.includes(l.id))];
+    const frontFenceTiles = [];
     const out = groups.map(group => {
       const c = document.createElement('canvas');
       c.width = mapW; c.height = mapH;
@@ -156,12 +160,20 @@
       const anim = [];
       group.forEach((layer, li) => layer.tiles.forEach((row, y) => row.forEach((t, x) => {
         if (!t) return;
+        const sheet = map.tilesheets[t.s];
+        if (layer.id === 'Front' && sheet?.image === 'outdoorsTileSheet' && MAP_FENCE_TILES.has(t.i)) {
+          frontFenceTiles.push({ x, y, t });
+          return;
+        }
         if (t.a) anim.push({ x, y, t, li });
         else drawTile(g, t, s, x * TILE, y * TILE);
       })));
       for (const a of anim) a.above = group.slice(a.li + 1).map(l => l.tiles[a.y][a.x]).filter(t => t && !t.a);
       return { canvas: c, anim };
     });
+    // Treat the map's upper fence row like Buildings so movable buildings draw over it.
+    const under = out[0].canvas.getContext('2d');
+    frontFenceTiles.forEach(({ x, y, t }) => drawTile(under, t, s, x * TILE, y * TILE));
     if (baked) baked.groups.forEach(gr => { gr.canvas.width = gr.canvas.height = 0; });   // let the old ones go now
     baked = { season: s, groups: out };
   }

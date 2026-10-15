@@ -128,6 +128,7 @@ function desktopLevel() {
 
 function makeScene(screen) {
   var f = screen.frame;
+  var screenKey = [f.origin.x, f.origin.y, f.size.width, f.size.height, screen.backingScaleFactor].join(',');
   var rect = $.NSMakeRect(f.origin.x, f.origin.y, f.size.width, f.size.height);
   var win = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(rect, 0, 2, false);
   win.level = desktopLevel();
@@ -146,6 +147,7 @@ function makeScene(screen) {
 
   return {
     screen: screen,
+    screenKey: screenKey,
     frame: { x: f.origin.x, y: f.origin.y, w: f.size.width, h: f.size.height },
     win: win, wv: web.wv, ucc: web.ucc, ready: false, fps: -1, cursor: 'init',
   };
@@ -233,9 +235,20 @@ function closeScene(s) {
 }
 
 function buildScenes() {
+  var list = $.NSScreen.screens.js;
+  var keys = list.map(function (screen) {
+    var f = screen.frame;
+    return [f.origin.x, f.origin.y, f.size.width, f.size.height, screen.backingScaleFactor].join(',');
+  });
+  // AppKit can send screen-parameter notifications during desktop/window transitions.
+  // Recreating every WKWebView for a duplicate notification flashes the desktop and
+  // reinitializes transient scene state (including animal positions), even if no display changed.
+  if (scenes.length === list.length && scenes.every(function (s, i) { return s.screenKey === keys[i]; })) {
+    log('屏幕参数通知：显示器布局未变化，保留现有场景');
+    return;
+  }
   hideCatcher();
   scenes.forEach(closeScene);
-  var list = $.NSScreen.screens.js;
   scenes = list.map(makeScene);
   coverage = scenes.map(function () { return 0; });
   log('场景窗口：' + scenes.length + ' 块屏幕');
@@ -250,6 +263,7 @@ function callAll(js) { scenes.forEach(function (s) { call(s, js); }); }
 function setFps(s, fps) {
   if (fps <= 0 && catcher && catcher.scene === s) hideCatcher();
   if (!s.ready || fps === s.fps) return;
+  log('场景渲染频率变化：' + s.fps + ' → ' + fps + ' FPS');
   s.fps = fps;
   call(s, 'SDV.host.setFps(' + fps + ')');
 }
@@ -1408,7 +1422,7 @@ ObjC.registerSubclass({
     'saverTick:': { types: ['void', ['id']], implementation: guard('saver', function () { saverTick(); }) },
     'menuAction:': { types: ['void', ['id']], implementation: guard('menu', function (sender) { menuAction(sender); }) },
     'menuNeedsUpdate:': { types: ['void', ['id']], implementation: guard('menuUpdate', function (menu) { rebuildMenu(menu); }) },
-    'screensChanged:': { types: ['void', ['id']], implementation: guard('screens', function () { buildScenes(); }) },
+    'screensChanged:': { types: ['void', ['id']], implementation: guard('screens', function () { log('收到显示器参数变更通知'); buildScenes(); }) },
     'powerChanged:': { types: ['void', ['id']], implementation: guard('power', function () { applyPolicy(); }) },
     'slept:': { types: ['void', ['id']], implementation: guard('sleep', function () { screensAsleep = true; applyPolicy(); }) },
     'woke:': { types: ['void', ['id']], implementation: guard('wake', function () { screensAsleep = false; applyPolicy(); }) },

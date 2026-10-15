@@ -67,7 +67,7 @@ SDV.critters = (() => {
     for (let i = 0; i < n; i++) {
       const land = { x: spot.x + rand(-20, 20), y: spot.y + rand(-10, 10) };
       if (!groundOK(land.x, land.y)) continue;
-      list.push({ kind: 'bird', base, state: 'in', x: from.x + rand(-20, 20), y: from.y + rand(-10, 10), z: 60, land, t: rand(0, 1), timer: rand(25, 80), act: 0, flip: land.x < from.x });
+      list.push({ kind: 'bird', base, state: 'in', x: from.x + rand(-20, 20), y: from.y + rand(-10, 10), z: 60, land, t: rand(0, 1), timer: rand(25, 80), act: 0, flip: land.x > from.x });
     }
   }
   function spawnFirefly(view) {
@@ -147,7 +147,7 @@ SDV.critters = (() => {
         if (c.state === 'in') {
           const dx = c.land.x - c.x, dy = c.land.y - c.y, d = Math.hypot(dx, dy);
           if (d < 3) { c.state = 'ground'; c.z = 0; c.x = c.land.x; c.y = c.land.y; }
-          else { const s = Math.min(d, 70 * dt); c.x += dx / d * s; c.y += dy / d * s; c.z = Math.min(60, d * 0.5); c.flip = dx < 0; }
+          else { const s = Math.min(d, 70 * dt); c.x += dx / d * s; c.y += dy / d * s; c.z = Math.min(60, d * 0.5); c.flip = dx > 0; }
         } else if (c.state === 'ground') {
           c.timer -= dt;
           if (near(c, 56) && stirring) flockFlees = true;
@@ -160,7 +160,7 @@ SDV.critters = (() => {
             c.act = rand(0.8, 2.5);
             if (c.pose === 'hop') {
               const nx = c.x + rand(-10, 10), ny = c.y + rand(-4, 4);
-              if (groundOK(nx, ny)) { c.flip = nx < c.x; c.hopFrom = { x: c.x, y: c.y }; c.hopTo = { x: nx, y: ny }; c.hopT = 0; }
+              if (groundOK(nx, ny)) { c.flip = nx > c.x; c.hopFrom = { x: c.x, y: c.y }; c.hopTo = { x: nx, y: ny }; c.hopT = 0; }
             }
           }
           if (c.hopTo) {
@@ -171,7 +171,7 @@ SDV.critters = (() => {
             if (k >= 1) { c.hopTo = null; c.z = 0; }
           }
         } else if (c.state === 'flee') {
-          if (!c.away) { const o = cur.on ? cur : { x: c.x - 1, y: c.y }; const dx = c.x - o.x || 1, d = Math.abs(dx); c.away = { vx: (dx / d) * rand(70, 100), vy: rand(-30, -10) }; c.flip = c.away.vx < 0; }
+          if (!c.away) { const o = cur.on ? cur : { x: c.x - 1, y: c.y }; const dx = c.x - o.x || 1, d = Math.abs(dx); c.away = { vx: (dx / d) * rand(70, 100), vy: rand(-30, -10) }; c.flip = c.away.vx > 0; }
           c.x += c.away.vx * dt; c.y += c.away.vy * dt * 0.3; c.z += 45 * dt;
           if (outside(c, view)) c.dead = true;
         }
