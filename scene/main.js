@@ -128,6 +128,7 @@
   const mapW = layers[0].w * TILE, mapH = layers[0].h * TILE;
   const UNDER = ['Back', 'Buildings'];   // drawn below props and animals
   // The Farm map puts the upper fence tiles on Front, but they belong below buildings.
+  // Maintainer question: why are these tiles on Front? Was that intentional for character occlusion?
   const MAP_FENCE_TILES = new Set([358, 359, 360, 361, 409]);
 
   function sheetImage(sheetIdx, s) {
