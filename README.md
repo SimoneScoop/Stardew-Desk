@@ -46,7 +46,7 @@ It ships no game assets: on first launch it reads them from your own copy of the
 
 ### 方式一：下载做好的 App（推荐，不用碰代码）
 
-1. 在本仓库的 [Releases](../../releases) 页面下载 `Stardew-Desk.zip`，解压。
+1. 在本仓库的 [Releases](../../releases) 页面下载 `Stardew-Desk-Mac.zip`，解压。
 2. 把 **Stardew Desk.app** 拖进「应用程序」。
 3. 第一次打开：右键点它 →「打开」→ 再点「打开」。
    macOS 15 及以后：先双击一次（会提示无法打开），然后去 **系统设置 → 隐私与安全性**，在最下面点「仍要打开」。
@@ -64,7 +64,7 @@ It ships no game assets: on first launch it reads them from your own copy of the
    - 如果提示没有权限执行，在「终端」里进到这个文件夹运行 `sh mac/install.sh`，效果一样。
 3. 之后改了代码，再双击一次就是更新；也可以在菜单栏叶子菜单 → 更多 →「更新到最新版本」。
 
-想发给朋友：双击 **打包分享版.command**，桌面上会出现 `Stardew-Desk.zip`，里面只有 App 和一份使用说明，不含任何游戏素材。
+想发给朋友：双击 **打包分享版.command**，桌面上会出现 `Stardew-Desk-Mac.zip`，里面只有 App 和一份使用说明，不含任何游戏素材。
 
 ## Windows 版
 
@@ -153,7 +153,7 @@ Windows：叶子菜单 → 更多 → 关掉「开机时启动」，退出，删
 
 ```
 安装或更新.command   双击：打包到 ~/Applications 并启动
-打包分享版.command   双击：在桌面生成发给别人的 Stardew-Desk.zip
+打包分享版.command   双击：在桌面生成发给别人的 Stardew-Desk-Mac.zip
 mac/
   host.js           桌面宿主（JXA）：窗口层级、菜单、屏保、天气、信箱、专注、音乐、首次设置
   musicx.js         从游戏音乐包里取出配乐（XACT ADPCM → AAC）
