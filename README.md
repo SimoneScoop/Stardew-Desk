@@ -3,12 +3,13 @@
 # Stardew Desk 🌱
 
 ![macOS](https://img.shields.io/badge/macOS-14%2B-lightgrey?logo=apple)
+![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-blue?logo=windows)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-把《星露谷物语》的农场铺到 Mac 桌面上：季节跟着真实月份走，天气是实时的，有昼夜、动物、会长大的作物、来访的村民。
+把《星露谷物语》的农场铺到电脑桌面上（Mac 和 Windows）：季节跟着真实月份走，天气是实时的，有昼夜、动物、会长大的作物、来访的村民。
 桌面图标照常点、照常拖；闲置一会儿，农场铺满全屏当屏保。
 
-*A living Stardew Valley farm as your macOS desktop wallpaper and screensaver. Real-time seasons, live weather,
+*A living Stardew Valley farm as your macOS or Windows desktop wallpaper and screensaver. Real-time seasons, live weather,
 day and night, animals, growing crops, visiting villagers, a pomodoro "focus farming" mode and the game's seasonal music.
 It ships no game assets: on first launch it reads them from your own copy of the game. UI in Chinese.*
 
@@ -41,6 +42,8 @@ It ships no game assets: on first launch it reads them from your own copy of the
 
 ## 安装
 
+> 下面先讲 Mac，Windows 版见 [Windows 版](#windows-版)。
+
 ### 方式一：下载做好的 App（推荐，不用碰代码）
 
 1. 在本仓库的 [Releases](../../releases) 页面下载 `Stardew-Desk.zip`，解压。
@@ -63,9 +66,25 @@ It ships no game assets: on first launch it reads them from your own copy of the
 
 想发给朋友：双击 **打包分享版.command**，桌面上会出现 `Stardew-Desk.zip`，里面只有 App 和一份使用说明，不含任何游戏素材。
 
+## Windows 版
+
+和 Mac 版是同一个农场、同样的功能（季节、天气与城市、宠物、屏保、公告板、专注种田、四季配乐），
+控制菜单在任务栏右下角的 🍃 图标里（左键右键都行；看不到的话点任务栏上的「^」）。
+
+1. 在 [Releases](../../releases) 页面下载 `Stardew-Desk-win.zip`（约 110 MB，里面是程序本身，不含游戏素材），解压到一个固定的文件夹。
+2. 双击 **Stardew Desk.exe**。第一次如果弹出蓝色的「Windows 已保护你的电脑」，点「更多信息」→「仍要运行」
+   （没有买代码签名证书，只会问这一次）。
+3. 设置窗口会自动在 Steam / GOG 的常见位置找到星露谷，读取画面约半分钟；找不到就点按钮选一下游戏文件夹。
+4. 叶子菜单 → 天气 → 更换城市…，输入你所在的城市。
+
+- 需要 Windows 10 / 11（64 位）和 Steam 或 GOG 版的星露谷；Xbox / 微软商店版的游戏文件被系统锁着，可能读不到。
+- 画面、设置、日志在 `%APPDATA%\Stardew Desk`；叶子菜单 → 更多 →「打开日志文件夹」。
+- **Windows 版刚发布，测试过的机器还不多。** 如果桌面上看不到农场或者是黑的，先试 叶子菜单 → 更多 → 桌面显示方式 →「兼容模式」；
+  还不行的话欢迎在 [Issues](../../issues) 里附上日志反馈。
+
 ## 使用
 
-农场铺在系统壁纸之上、桌面图标之下，系统壁纸本身不会被改动。菜单栏右上角的 🍃 是控制菜单：
+农场铺在系统壁纸之上、桌面图标之下，系统壁纸本身不会被改动。🍃 是控制菜单（Mac 在菜单栏右上角，Windows 在任务栏右下角）：
 
 ```
 季节 ›              跟随真实月份 / 春 / 夏 / 秋 / 冬
@@ -97,25 +116,33 @@ It ships no game assets: on first launch it reads them from your own copy of the
 
 ## 隐私与权限
 
-- **只读游戏，不改游戏。** 读取出来的画面、配乐都存在 `~/Library/Application Support/Stardew Desk`，不会上传到任何地方。
+- **只读游戏，不改游戏。** 读取出来的画面、配乐都存在本机（Mac：`~/Library/Application Support/Stardew Desk`；Windows：`%APPDATA%\Stardew Desk`），不会上传到任何地方。
 - **联网只用于天气**：按你输入的城市（没输入时按时区对应的城市）的坐标请求 Open-Meteo，不读定位，不带任何个人信息，也不需要 API Key。
   国内常见城市的坐标是内置的；输入其他城市时，会把城市名发给 Open-Meteo 的地名查询换成坐标。
 - **新文件提醒**需要一次「桌面」「下载」文件夹的访问授权，只比对文件名；不想要可以在 更多 里关掉。
 - 光标位置程序本来就知道，宠物跟随鼠标不需要辅助功能等额外权限。
-- **待办和日薪**只存在这台 Mac 上（App 自己的设置里），不会上传。
+- **待办和日薪**只存在这台电脑上（App 自己的设置里），不会上传。
 
 ## 占用
 
-- App 本身只有代码，约 0.6 MB；从游戏读取的画面约 2 MB；配乐在第一次播放某个季节时才取出来（每季约 7 MB）。
+- Mac 版 App 本身只有代码，约 0.6 MB；Windows 版带着 Electron 运行环境，压缩包约 110 MB。两边从游戏读取的画面约 2 MB；配乐在第一次播放某个季节时才取出来（每季约 7 MB）。
 - 只加载当前季节的画面；桌面被窗口挡住大半时降到 8 fps，几乎挡满、低电量模式、锁屏或屏幕休眠时停止渲染。
-- 在 M1 MacBook Air（8 GB）上日常运行。
+- 在 M1 MacBook Air（8 GB）上日常运行；Windows 版已在 Windows 真机上跑通。
 
 ## 卸载
 
 叶子菜单 → 更多 → 关掉「登录时启动」，退出，然后把 `Stardew Desk.app` 扔进废纸篓，
 再删掉 `~/Library/Application Support/Stardew Desk`。从源码安装的也可以运行 `sh mac/uninstall.sh`。
 
+Windows：叶子菜单 → 更多 → 关掉「开机时启动」，退出，删掉程序所在的文件夹，再删掉 `%APPDATA%\Stardew Desk`。
+
 ## 开发
+
+**Windows 版**（`win/`）用 Electron 做宿主，场景还是同一个 `scene/`：`cd win && npm install && npm start` 运行，
+`npm run dist` 打出 `win/dist/Stardew-Desk-win.zip`（在 macOS / Linux 上也能打包）。
+桌面图标下面那一层用的是 WorkerW（和 Lively、Wallpaper Engine 同样的办法），Win32 调用经由 [koffi](https://koffi.dev/)。
+
+**Mac 版**：
 
 整个场景是一个普通网页，直接双击 `scene/index.html` 就能在浏览器里预览（先装过一次 App 读好游戏画面，再把
 `~/Library/Application Support/Stardew Desk/scene/data` 复制到仓库的 `scene/data/`）。网址参数可以直接模拟：`index.html?t=18.5&w=rain&s=fall`
@@ -133,6 +160,11 @@ mac/
   build.sh          编译 App；install / package / uninstall / debug.sh
   AppIcon.icns      App 图标（原创像素画，源图 AppIcon-1024.png）
   使用说明.txt       分享版附带的说明
+win/
+  main.js           Windows 宿主（Electron）：托盘菜单、设置窗口、屏保、天气、信箱、专注、音乐、首次设置
+  winapi.js         放到桌面图标下面、判断窗口遮挡（Win32，经由 koffi）
+  wavebank.js       从游戏音乐包里取出配乐；adpcm.js 在播放时解码
+  使用说明.txt       Windows 分享版附带的说明
 scene/
   setup.html/js     首次运行：从游戏里读取画面
   lib/              xnb.js（XNB 解包，LGPL-3.0，附许可证全文）、tbin.js（地图解析）

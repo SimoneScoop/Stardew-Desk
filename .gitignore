@@ -12,3 +12,7 @@ scene/data/
 # 系统 / 编辑器
 .DS_Store
 node_modules/
+
+# Windows 版的构建产物
+win/dist/
+*.wav

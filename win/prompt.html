@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Stardew Desk</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<style>
+  :root { color-scheme: light dark; --bg: #f6f1e7; --fg: #3b2a1a; --muted: #7a6a58; --line: #d8cbb6; --accent: #2f7d4f; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #26201a; --fg: #f1e7d6; --muted: #b5a690; --line: #4a3f33; --accent: #4fae76; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 22px 24px 18px; background: var(--bg); color: var(--fg);
+    font: 14px/1.55 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif; user-select: none; }
+  h1 { font-size: 16px; margin: 0 0 6px; }
+  p { margin: 0 0 14px; color: var(--muted); white-space: pre-line; }
+  input { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+    background: transparent; color: var(--fg); outline: none; }
+  input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent); }
+  .row { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+  button { font: inherit; padding: 6px 18px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--fg); cursor: pointer; }
+  button.ok { background: var(--accent); border-color: var(--accent); color: #fff; }
+</style>
+</head>
+<body>
+  <h1 id="title"></h1>
+  <p id="msg"></p>
+  <input id="text" maxlength="40" autocomplete="off" spellcheck="false">
+  <div class="row"><button id="cancel">取消</button><button id="ok" class="ok">确定</button></div>
+<script>
+  const $ = id => document.getElementById(id);
+  SDV_APP.on('prompt:init', o => {
+    $('title').textContent = o.title || '';
+    $('msg').textContent = o.message || '';
+    $('text').placeholder = o.placeholder || '';
+    $('text').value = o.value || '';
+    $('ok').textContent = o.ok || '确定';
+    $('text').focus();
+    $('text').select();
+  });
+  const done = v => SDV_APP.send('prompt:done', v);
+  $('ok').onclick = () => done($('text').value);
+  $('cancel').onclick = () => done(null);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); done($('text').value); }
+    else if (e.key === 'Escape') done(null);
+  });
+</script>
+</body>
+</html>
