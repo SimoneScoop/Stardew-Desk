@@ -101,7 +101,9 @@ var S = {
   set season(v) { setStr('season', v); },
   get weather() { return getStr('weather', 'live'); },
   set weather(v) { setStr('weather', v); },
-  get saverMinutes() { var v = defaults.objectForKey('saverMinutes'); return v.isNil() ? 5 : defaults.integerForKey('saverMinutes'); },
+  // integerForKey comes back from the ObjC bridge as a wrapped object, not a JS number:
+  // it prints as "0" but !value is false, so 关闭 (0) never stopped the idle check.
+  get saverMinutes() { var v = defaults.objectForKey('saverMinutes'); return v.isNil() ? 5 : Number(ObjC.unwrap(defaults.integerForKey('saverMinutes'))) || 0; },
   set saverMinutes(v) { defaults.setIntegerForKey(v, 'saverMinutes'); },
   get focus() { try { return JSON.parse(getStr('focus', 'null')); } catch (e) { return null; } },
   set focus(v) { setStr('focus', JSON.stringify(v || null)); },
@@ -1309,7 +1311,7 @@ function saverTick() {
   saverClock++;
   if (saverClock % 20) return;          // the rest runs once a second
   var minutes = S.saverMinutes;
-  if (!minutes || locked || screensAsleep || S.paused) return;
+  if (!(minutes > 0) || locked || screensAsleep || S.paused) return;
   var idle = idleSeconds();
   if (idle < minutes * 60) return;
   if (Date.now() < saverBlockedUntil) return;
