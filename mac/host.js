@@ -1271,6 +1271,11 @@ function stopSaver() {
 function finishSaver() {
   var s = saver;
   saver = null;
+  // idleSeconds() can report a stray high reading moments after real input resets it
+  // (seen on real hardware as the saver closing and reopening two or three times in
+  // under 15s). A closed saver gets a short grace period before the idle check is
+  // trusted again, so one bad reading can't immediately reopen it.
+  saverBlockedUntil = Math.max(saverBlockedUntil, Date.now() + 10000);
   s.views.forEach(function (v) {
     try { v.ucc.removeScriptMessageHandlerForName('sdv'); } catch (e) { /* ignore */ }
     v.win.orderOut(NIL);
@@ -1289,7 +1294,10 @@ function saverTick() {
   if (saver) {
     var idle = idleSeconds();
     var age = (Date.now() - saver.started) / 1000;
-    if (!saver.closing && age > 1.5 && idle < saver.lastIdle - 0.2) stopSaver();
+    if (!saver.closing && age > 1.5 && idle < saver.lastIdle - 0.2) {
+      log('屏保：检测到输入（闲置 ' + saver.lastIdle.toFixed(1) + 's → ' + idle.toFixed(1) + 's），关闭');
+      stopSaver();
+    }
     saver.lastIdle = idle;
     if (locked || screensAsleep || !S.saverMinutes) stopSaver();   // the setting can turn off mid-show
     var step = saver.closing ? -0.2 : 0.05;
@@ -1302,9 +1310,11 @@ function saverTick() {
   if (saverClock % 20) return;          // the rest runs once a second
   var minutes = S.saverMinutes;
   if (!minutes || locked || screensAsleep || S.paused) return;
-  if (idleSeconds() < minutes * 60) return;
+  var idle = idleSeconds();
+  if (idle < minutes * 60) return;
   if (Date.now() < saverBlockedUntil) return;
   if (displayHeldAwake()) { saverBlockedUntil = Date.now() + 60000; return; }
+  log('屏保：自动触发（设置 ' + minutes + ' 分钟，闲置 ' + idle.toFixed(1) + 's）');
   startSaver(false);
 }
 
