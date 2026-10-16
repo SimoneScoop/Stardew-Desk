@@ -62,6 +62,16 @@ function guard(name, fn) {
     try { return fn.apply(null, arguments); } catch (e) { log('错误 [' + name + ']: ' + e + (e && e.line ? ' @' + e.line : '')); }
   };
 }
+// NSAlert.runModal called synchronously from inside a menu item's own click handler
+// (the status-bar menu is still tearing down its tracking session at that instant) is a
+// fragile pattern on recent macOS/Apple Silicon — it can crash instead of just showing
+// the alert. Scheduling the call one runloop tick later, after the menu has fully
+// closed, avoids it.
+var pendingModal = null;
+function deferModal(fn) {
+  pendingModal = fn;
+  $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.05, target, 'runDeferred:', NIL, false);
+}
 
 // ---------- settings (NSUserDefaults) ----------
 var defaults = $.NSUserDefaults.standardUserDefaults;
@@ -650,7 +660,7 @@ function boardAction(kind, val) {
     b.today = val === 'auto' ? null : { day: todayKey(), mode: val };
     setBoard(b);
   } else if (kind === 'boardAdd') {
-    addTodoDialog();
+    deferModal(addTodoDialog);
   } else if (kind === 'boardSound') {
     b.sound = !sfxOn(b);
     setBoard(b);
@@ -1385,7 +1395,7 @@ function menuAction(sender) {
     editorCall('SDV.host.apply(' + JSON.stringify(kind) + ',' + JSON.stringify(val) + ')');
   }
   else if (kind === 'editor') { openEditor(); }
-  else if (kind === 'city') { if (val === 'auto') setLocation(null); else cityDialog(); }
+  else if (kind === 'city') { if (val === 'auto') setLocation(null); else deferModal(cityDialog); }
   else if (kind === 'realtime') { applySetting('time', null); editorCall('SDV.host.apply("time",null)'); }
   else if (kind === 'quality') { S.quality = val; applyPolicy(); }
   else if (kind === 'saver') { S.saverMinutes = Number(val); }
@@ -1420,6 +1430,7 @@ ObjC.registerSubclass({
     'coverageTick:': { types: ['void', ['id']], implementation: guard('coverage', function () { updateCoverage(); }) },
     'weatherTick:': { types: ['void', ['id']], implementation: guard('weather', function () { weatherTick(); }) },
     'saverTick:': { types: ['void', ['id']], implementation: guard('saver', function () { saverTick(); }) },
+    'runDeferred:': { types: ['void', ['id']], implementation: guard('deferred', function () { var fn = pendingModal; pendingModal = null; if (fn) fn(); }) },
     'menuAction:': { types: ['void', ['id']], implementation: guard('menu', function (sender) { menuAction(sender); }) },
     'menuNeedsUpdate:': { types: ['void', ['id']], implementation: guard('menuUpdate', function (menu) { rebuildMenu(menu); }) },
     'screensChanged:': { types: ['void', ['id']], implementation: guard('screens', function () { log('收到显示器参数变更通知'); buildScenes(); }) },
