@@ -1280,7 +1280,7 @@ function saverTick() {
     var age = (Date.now() - saver.started) / 1000;
     if (!saver.closing && age > 1.5 && idle < saver.lastIdle - 0.2) stopSaver();
     saver.lastIdle = idle;
-    if (locked || screensAsleep) stopSaver();
+    if (locked || screensAsleep || !S.saverMinutes) stopSaver();   // the setting can turn off mid-show
     var step = saver.closing ? -0.2 : 0.05;
     saver.alpha = Math.max(0, Math.min(1, saver.alpha + step));
     saver.views.forEach(function (v) { v.win.alphaValue = saver.alpha; });
@@ -1398,7 +1398,7 @@ function menuAction(sender) {
   else if (kind === 'city') { if (val === 'auto') setLocation(null); else deferModal(cityDialog); }
   else if (kind === 'realtime') { applySetting('time', null); editorCall('SDV.host.apply("time",null)'); }
   else if (kind === 'quality') { S.quality = val; applyPolicy(); }
-  else if (kind === 'saver') { S.saverMinutes = Number(val); }
+  else if (kind === 'saver') { S.saverMinutes = Number(val); if (saver) stopSaver(); }
   else if (kind === 'saverNow') { startSaver(true); }
   else if (kind === 'focus') { startFocus(Number(val) || 25); }
   else if (kind === 'focusStop') { giveUpFocus(); }
