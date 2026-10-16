@@ -270,10 +270,10 @@ function call(s, js) {
 }
 function callAll(js) { scenes.forEach(function (s) { call(s, js); }); }
 
-function setFps(s, fps) {
+function setFps(s, fps, reason) {
   if (fps <= 0 && catcher && catcher.scene === s) hideCatcher();
   if (!s.ready || fps === s.fps) return;
-  log('场景渲染频率变化：' + s.fps + ' → ' + fps + ' FPS');
+  log('场景渲染频率变化：' + s.fps + ' → ' + fps + ' FPS' + (reason ? '（' + reason + '）' : ''));
   s.fps = fps;
   call(s, 'SDV.host.setFps(' + fps + ')');
 }
@@ -1048,8 +1048,19 @@ function fpsFor(i) {
   if (c > 0.6) return Math.min(8, q);
   return q;
 }
+// Why fpsFor(i) returned what it did, for the log — fpsFor alone can't tell a saver
+// pause from a window-coverage pause from a low-power pause, and they all look the
+// same on screen (the farm freezes), so this is what makes a repeat flicker diagnosable.
+function fpsReason(i) {
+  var r = stopReason();
+  if (r) return r;
+  var c = coverage[i] || 0;
+  if (c > 0.97) return '窗口遮挡 ' + Math.round(c * 100) + '%，已停止渲染';
+  if (c > 0.6) return '窗口遮挡 ' + Math.round(c * 100) + '%，降帧';
+  return null;
+}
 function applyPolicy() {
-  scenes.forEach(function (s, i) { setFps(s, fpsFor(i)); });
+  scenes.forEach(function (s, i) { setFps(s, fpsFor(i), fpsReason(i)); });
   restartCursorTimer();
 }
 
@@ -1434,7 +1445,7 @@ ObjC.registerSubclass({
     'menuAction:': { types: ['void', ['id']], implementation: guard('menu', function (sender) { menuAction(sender); }) },
     'menuNeedsUpdate:': { types: ['void', ['id']], implementation: guard('menuUpdate', function (menu) { rebuildMenu(menu); }) },
     'screensChanged:': { types: ['void', ['id']], implementation: guard('screens', function () { log('收到显示器参数变更通知'); buildScenes(); }) },
-    'powerChanged:': { types: ['void', ['id']], implementation: guard('power', function () { applyPolicy(); }) },
+    'powerChanged:': { types: ['void', ['id']], implementation: guard('power', function () { log('电源状态变化：低电量模式 ' + (lowPower() ? '开' : '关')); applyPolicy(); }) },
     'slept:': { types: ['void', ['id']], implementation: guard('sleep', function () { screensAsleep = true; applyPolicy(); }) },
     'woke:': { types: ['void', ['id']], implementation: guard('wake', function () { screensAsleep = false; applyPolicy(); }) },
     'locked:': { types: ['void', ['id']], implementation: guard('lock', function () { locked = true; applyPolicy(); }) },
