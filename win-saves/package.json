@@ -1,0 +1,25 @@
+{
+  "name": "stardew-desk-saves",
+  "productName": "Stardew Desk 存档版",
+  "version": "0.5.0",
+  "description": "从本机星露谷存档还原农场的只读桌面壁纸",
+  "main": "main.cjs",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.cjs",
+    "start:save": "electron . --save-mode",
+    "start:custom": "electron . --standalone",
+    "pack:assets": "node scripts/export-pack.cjs"
+  },
+  "dependencies": {
+    "fast-xml-parser": "5.11.2",
+    "koffi": "2.9.1",
+    "opentype.js": "^1.3.4",
+    "pngjs": "^7.0.0"
+  },
+  "devDependencies": {
+    "electron": "^39.0.0"
+  },
+  "license": "MIT"
+}

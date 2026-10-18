@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Stardew Desk 设置</title>
+<style>
+  :root { --bg: #3a2414; --card: #5b3a22; --edge: #c47a2c; --ink: #fbe7c0; --dim: #d6b98a; --accent: #f2c14e; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 14px/1.6 -apple-system, "PingFang SC", sans-serif; user-select: none; -webkit-user-select: none; }
+  main { padding: 28px 32px; }
+  h1 { font-size: 18px; margin: 0 0 6px; color: var(--accent); }
+  p { margin: 6px 0; color: var(--dim); }
+  .step { display: none; }
+  .step.on { display: block; }
+  button { font: inherit; color: var(--ink); background: var(--card); border: 1px solid #8a5a33; border-radius: 5px; padding: 4px 12px; cursor: pointer; }
+  button.main { background: var(--accent); color: #3a2414; border-color: var(--accent); font-weight: 600; padding: 6px 18px; }
+  button:disabled { opacity: .45; cursor: default; }
+  .track { height: 10px; background: #2a190d; border: 1px solid var(--edge); border-radius: 6px; overflow: hidden; margin: 16px 0 8px; }
+  #bar { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; align-items: center; }
+  .small { font-size: 12px; color: var(--dim); }
+  .foot { margin-top: 18px; display: flex; justify-content: space-between; align-items: center; }
+  code { color: var(--accent); }
+</style>
+<style>@font-face{font-family:StardewGame;src:url("sdv://app/game-font.ttf") format("truetype");font-weight:100 900}*{font-family:StardewGame!important;font-synthesis:none}</style></head>
+<body>
+<main>
+  <section class="step" id="step-hello">
+    <h1>正在找你电脑上的星露谷物语…</h1>
+  </section>
+
+  <section class="step" id="step-find">
+    <h1>需要星露谷物语的游戏文件</h1>
+    <p id="find-msg"></p>
+    <p>这个桌面用的是你电脑上星露谷物语里的画面，所以需要先装好正版游戏（Steam、App Store 或 GOG 都行）。</p>
+    <p class="small">Steam 版通常在 <code>~/Library/Application Support/Steam/steamapps/common/Stardew Valley</code>，
+      App Store / GOG 版在「应用程序」里的 <code>Stardew Valley</code>。选游戏本身或它所在的文件夹都可以。</p>
+    <div class="row"><button class="main" id="choose">选择游戏位置…</button></div>
+  </section>
+
+  <section class="step" id="step-read">
+    <h1>正在从游戏里读取画面</h1>
+    <p class="small">游戏位置：<span id="where"></span></p>
+    <div class="track"><div id="bar"></div></div>
+    <p id="label">准备中…</p>
+    <p class="small">只读取，不改动游戏；画面只保存在这台电脑上。大约需要半分钟。</p>
+  </section>
+
+  <section class="step" id="step-done">
+    <h1>读好了，可以开始了</h1>
+    <p>天气和日出日落默认按这台电脑的时区自动对上；之后可以在叶子菜单的「天气 › 更换城市…」里改成你所在的城市。</p>
+    <div class="row"><label><input type="checkbox" id="music"> 播放星露谷的四季配乐</label></div>
+    <p class="small">配乐来自游戏本身，第一次播放某个季节时会从游戏里取出来（每季约 7 MB）。以后可以在叶子菜单里开关、调音量。</p>
+    <div class="foot"><span class="small">素材版本 <span data-version></span></span><button class="main" id="done">开始</button></div>
+  </section>
+</main>
+<script src="lib/xnb.js"></script>
+<script src="lib/tbin.js"></script>
+<script src="setup.js"></script>
+<script src="game-font.js"></script></body>
+</html>

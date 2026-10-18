@@ -1,0 +1,9 @@
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const {PNG}=require('pngjs'),{PortraitPack,parseData}=require('../portrait-pack.cjs');
+test('portrait data preserves quoted text, selects configured styles and uses winter variants',()=>{
+ assert.deepEqual(parseData('{"url":"https://example.invalid/a",/*ignored*/"a":[1,2,],//ignored\n}'),{url:'https://example.invalid/a',a:[1,2]});
+ const temp=fs.mkdtempSync(path.join(os.tmpdir(),'stardew-portraits-')),packDir=path.join(temp,'pack'),cache=path.join(temp,'cache');fs.mkdirSync(packDir);const png=new PNG({width:128,height:128});const bytes=PNG.sync.write(png);for(const name of ['normal','glasses','winter'])fs.writeFileSync(path.join(packDir,name+'.png'),bytes);
+ const patches=[['normal','Portraits/Abigail',{Style:'Normal'}],['glasses','Portraits/Abigail',{Style:'Glasses'}],['winter','Portraits/Abigail_Winter',{}]].map(([file,Target,When])=>({Action:'EditImage',Target,When,FromFile:file+'.png'}));fs.writeFileSync(path.join(packDir,'content.json'),JSON.stringify({ConfigSchema:{Style:{Default:'Normal'}},Changes:patches}));fs.writeFileSync(path.join(packDir,'config.json'),' { "Style":"Glasses" } ');
+ try{const pack=new PortraitPack(packDir,cache);assert.equal(pack.resolve('Abigail','fall').source.file,'glasses.png');assert.equal(pack.resolve('Abigail','winter').source.file,'winter.png');assert.equal(pack.resolve('Robin','winter'),null);assert.equal(fs.readdirSync(cache).length,1);fs.writeFileSync(path.join(temp,'outside.png'),bytes);pack.changes=[{Action:'EditImage',Target:'Portraits/Abigail',FromFile:'../outside.png'}];assert.throws(()=>pack.resolve('Abigail','fall'),/超出/);}
+ finally{const resolved=path.resolve(temp);assert.ok(resolved.startsWith(path.resolve(os.tmpdir())+path.sep)&&path.basename(resolved).startsWith('stardew-portraits-'));fs.rmSync(resolved,{recursive:true,force:true});}
+});
