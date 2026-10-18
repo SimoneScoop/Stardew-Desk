@@ -1,7 +1,7 @@
 {
   "name": "stardew-desk-saves",
   "productName": "Stardew Desk 存档版",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "从本机星露谷存档还原农场的只读桌面壁纸",
   "main": "main.cjs",
   "private": true,
