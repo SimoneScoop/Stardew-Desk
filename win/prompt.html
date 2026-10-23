@@ -12,35 +12,74 @@
     font: 14px/1.55 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif; user-select: none; }
   h1 { font-size: 16px; margin: 0 0 6px; }
   p { margin: 0 0 14px; color: var(--muted); white-space: pre-line; }
-  input { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+  input, select { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
     background: transparent; color: var(--fg); outline: none; }
-  input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent); }
+  select option { background: var(--bg); color: var(--fg); }
+  input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent); }
+  .when { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+  .when label { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+  .when input[type=checkbox] { width: auto; accent-color: var(--accent); }
+  .when input[type=datetime-local] { flex: 1; padding: 5px 8px; }
   .row { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+  .row .left { margin-right: auto; }
   button { font: inherit; padding: 6px 18px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--fg); cursor: pointer; }
   button.ok { background: var(--accent); border-color: var(--accent); color: #fff; }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
   <h1 id="title"></h1>
   <p id="msg"></p>
   <input id="text" maxlength="40" autocomplete="off" spellcheck="false">
-  <div class="row"><button id="cancel">取消</button><button id="ok" class="ok">确定</button></div>
+  <select id="list" hidden></select>
+  <div class="when" id="when" hidden><label><input id="remind" type="checkbox"> <span id="remind-label">到点提醒</span></label><input id="at" type="datetime-local"></div>
+  <div class="row"><button id="other" class="left" hidden></button><button id="cancel">取消</button><button id="ok" class="ok">确定</button></div>
 <script>
+  // Modes: a line of text (default); text + an optional reminder time (o.time = default ms);
+  // a choice from a list (o.choices, with an optional extra button o.other).
   const $ = id => document.getElementById(id);
+  const pad = n => String(n).padStart(2, '0');
+  const local = ms => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+  let mode = 'text';
   SDV_APP.on('prompt:init', o => {
     $('title').textContent = o.title || '';
     $('msg').textContent = o.message || '';
+    $('ok').textContent = o.ok || o.okDefault || '确定';
+    $('cancel').textContent = o.cancelText || '取消';
+    $('remind-label').textContent = o.remindText || '到点提醒';
+    if (o.choices) {
+      mode = 'choice';
+      $('text').hidden = true; $('list').hidden = false;
+      o.choices.forEach((c, i) => { const op = document.createElement('option'); op.value = i; op.textContent = c; $('list').appendChild(op); });
+      if (o.other) { $('other').hidden = false; $('other').textContent = o.other; }
+      $('list').focus();
+      return;
+    }
     $('text').placeholder = o.placeholder || '';
     $('text').value = o.value || '';
-    $('ok').textContent = o.ok || '确定';
+    if (o.time) {
+      mode = 'time';
+      $('when').hidden = false;
+      $('at').value = local(o.time);
+      $('at').addEventListener('change', () => { $('remind').checked = Boolean($('at').value); });
+    }
     $('text').focus();
     $('text').select();
   });
+  const value = () => {
+    if (mode === 'choice') return { index: Number($('list').value) };
+    if (mode === 'time') {
+      const at = $('remind').checked && $('at').value ? new Date($('at').value).getTime() : null;
+      return { text: $('text').value, at: at > 0 ? at : null };
+    }
+    return $('text').value;
+  };
   const done = v => SDV_APP.send('prompt:done', v);
-  $('ok').onclick = () => done($('text').value);
+  $('ok').onclick = () => done(value());
   $('cancel').onclick = () => done(null);
+  $('other').onclick = () => done({ other: true });
   document.addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); done($('text').value); }
+    if (e.key === 'Enter' && e.target.type !== 'checkbox') { e.preventDefault(); done(value()); }
     else if (e.key === 'Escape') done(null);
   });
 </script>

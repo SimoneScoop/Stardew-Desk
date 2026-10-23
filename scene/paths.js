@@ -9,6 +9,7 @@
 window.SDV = window.SDV || {};
 SDV.paths = (() => {
   'use strict';
+  const tr = (...a) => (window.SDV_I18N ? SDV_I18N.L(...a) : a[0]);
 
   let TILE = 16, cfg = null, map = null, W = 80, H = 65;
   let paths = new Set(), fences = new Set(), lamps = new Set();
@@ -24,8 +25,7 @@ SDV.paths = (() => {
   // ---------- what can go where ----------
   const inMap = (x, y) => x >= 1 && y >= 1 && x < W - 1 && y < H - 1;
   function underBuilding(x, y, layout) {
-    for (const n of SDV.layout.names) {
-      const f = SDV.layout.footprint(n, layout);
+    for (const f of SDV.layout.footprints(layout)) {
       if (x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h) return true;
     }
     for (const n of SDV.layout.small) {
@@ -41,15 +41,15 @@ SDV.paths = (() => {
   }
   // Can `kind` ('path' | 'fence' | 'lamp') go on (x, y)? Returns null or the reason.
   function problem(kind, x, y, layout) {
-    if (!inMap(x, y)) return '超出农场范围';
-    if (SDV.layout.isSolid(x, y)) return '这里有水或障碍';
-    if (underBuilding(x, y, layout)) return '这里有建筑';
-    if (inField(x, y)) return '这里是作物田';
-    if (SDV.decor.objectAt(x, y, 'none')) return '这里有小物件';
+    if (!inMap(x, y)) return tr('超出农场范围');
+    if (SDV.layout.isSolid(x, y)) return tr('这里有水或障碍');
+    if (underBuilding(x, y, layout)) return tr('这里有建筑');
+    if (inField(x, y)) return tr('这里是作物田');
+    if (SDV.decor.objectAt(x, y, 'none')) return tr('这里有小物件');
     const k = key(x, y);
-    if (kind !== 'path' && paths.has(k)) return '这里是路';
-    if (kind !== 'fence' && fences.has(k)) return '这里是围栏';
-    if (kind !== 'lamp' && lamps.has(k)) return '这里有路灯';
+    if (kind !== 'path' && paths.has(k)) return tr('这里是路');
+    if (kind !== 'fence' && fences.has(k)) return tr('这里是围栏');
+    if (kind !== 'lamp' && lamps.has(k)) return tr('这里有路灯');
     return null;
   }
 
@@ -263,7 +263,7 @@ SDV.paths = (() => {
     if (tool === 'erase') {
       const hit = paths.has(k) || fences.has(k) || lamps.has(k);
       paths.delete(k); fences.delete(k); lamps.delete(k);
-      return hit ? null : '这里没有可以擦掉的';
+      return hit ? null : tr('这里没有可以擦掉的');
     }
     const why = problem(tool, x, y, layout);
     if (why) return why;

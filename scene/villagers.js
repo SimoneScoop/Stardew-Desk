@@ -24,6 +24,20 @@ SDV.villagers = (() => {
   ];
   // Where the farm meets the rest of the valley (from the map's warps).
   const ENTRANCE = { east: [78, 16], south: [41, 63], north: [40, 2] };
+  // Other farm maps: the same three roads, wherever their warps put them.
+  function setMap(map) {
+    const W = map.layers[0].w, H = map.layers[0].h;
+    const w = String((map.properties || {}).Warp || '').trim().split(/\s+/);
+    const seen = {};
+    for (let i = 0; i + 4 < w.length; i += 5) {
+      const x = Number(w[i]), y = Number(w[i + 1]), to = w[i + 2];
+      const side = to === 'BusStop' ? 'east' : to === 'Forest' ? 'south' : to === 'Backwoods' ? 'north' : null;
+      if (!side || seen[side] || Number.isNaN(x) || Number.isNaN(y)) continue;
+      seen[side] = true;
+      ENTRANCE[side] = [Math.max(1, Math.min(W - 2, x)), Math.max(2, Math.min(H - 2, y))];
+    }
+    walker = null;
+  }
   const SPEED = 34;                       // map px per second, an easy stroll
 
   function init(config, tile) { cfg = config; TILE = tile; }
@@ -32,7 +46,7 @@ SDV.villagers = (() => {
   function walkable(x, y) {
     if (SDV.layout.isSolid(x, y)) return false;
     const L = SDV.layout.offsets();
-    for (const n of SDV.layout.names) { const f = SDV.layout.footprint(n, L); if (x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h) return false; }
+    for (const f of SDV.layout.footprints(L)) { if (x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h) return false; }
     for (const n of SDV.layout.small) { const f = SDV.layout.propFootprint(cfg, n); if (x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h) return false; }
     if (SDV.decor.fieldRects().some(f => x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h)) return false;
     if (SDV.decor.objectAt(x, y, 'none') || SDV.paths.blocksWalk(x, y)) return false;
@@ -168,5 +182,5 @@ SDV.villagers = (() => {
   // For tests and the settings window: send someone now.
   function visit(id) { const v = ROSTER.find(r => r.id === id) || pick(ROSTER); walker = null; return start(v); }
 
-  return { init, update, sprites, emotes, current, visit, roster: ROSTER };
+  return { init, setMap, update, sprites, emotes, current, visit, roster: ROSTER };
 })();

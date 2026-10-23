@@ -31,8 +31,7 @@ SDV.critters = (() => {
     if (!SDV.layout || SDV.layout.isSolid(x, y)) return false;
     if (SDV.decor && SDV.decor.objectAt(x, y, 'none')) return false;
     if (SDV.paths && SDV.paths.blocksWalk(x, y)) return false;
-    for (const n of SDV.layout.names) {
-      const f = SDV.layout.footprint(n, SDV.layout.offsets());
+    for (const f of SDV.layout.footprints(SDV.layout.offsets())) {
       if (x >= f.x - 0 && x < f.x + f.w && y >= f.y - 2 && y < f.y + f.h) return false;
     }
     return !(SDV.decor && SDV.decor.treeList().some(t => Math.abs(t.x - x) <= 1 && t.y - y >= 0 && t.y - y <= 2));

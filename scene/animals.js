@@ -3,6 +3,7 @@
 window.SDV = window.SDV || {};
 SDV.animals = (() => {
   'use strict';
+  const tr = (...a) => (window.SDV_I18N ? SDV_I18N.L(...a) : a[0]);
 
   const r4 = a => [a, a + 1, a + 2, a + 3];
   // Frame numbers read off the sprite sheets (4 frames per row).
@@ -221,7 +222,7 @@ SDV.animals = (() => {
 
   function summary() {
     const out = list.filter(a => a.state !== 'inside').length;
-    return `${out}/${list.length} 只在外面`;
+    return tr('{0}/{1} 只在外面', out, list.length);
   }
 
   return { init, update, sprites, emotes, anyOutside, summary, outside, busy, startle, pet, hit };

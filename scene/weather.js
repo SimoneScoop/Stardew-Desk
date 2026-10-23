@@ -2,6 +2,7 @@
 window.SDV = window.SDV || {};
 SDV.weather = (() => {
   'use strict';
+  const tr = (...a) => (window.SDV_I18N ? SDV_I18N.L(...a) : a[0]);
 
   const LABEL = { sunny: '晴', cloudy: '阴', fog: '雾', rain: '雨', storm: '雷雨', snow: '雪', windy: '大风' };
   // How much each weather darkens the scene (multiplied with the sky colour).
@@ -89,23 +90,23 @@ SDV.weather = (() => {
       const w = override === 'windy'
         ? { type: 'sunny', heavy: false, windy: true, wind: 30 }
         : { type: override, heavy: override === 'storm', windy: override === 'storm', wind: 0 };
-      return { ...w, source: '手动' };
+      return { ...w, source: tr('手动') };
     }
     const fresh = live && Date.now() - live.at < cfg.offlineAfterHours * 3600e3;
     if (fresh) {
       const t = new Date(live.at);
       const hhmm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
-      return { ...fromLive(live), source: `实时 · ${hhmm} 更新` };
+      return { ...fromLive(live), source: tr('实时 · {0} 更新', hhmm) };
     }
-    return { ...randomFor(date, season), source: '离线 · 按季节随机' };
+    return { ...randomFor(date, season), source: tr('离线 · 按季节随机') };
   }
 
   function label(w) {
     let s = LABEL[w.type];
     if (w.type === 'rain' && w.heavy) s = '大雨';
     if (w.type === 'snow' && w.heavy) s = '大雪';
-    if (w.windy && w.type !== 'storm') s += '，有风';
-    return s;
+    if (w.windy && w.type !== 'storm') return tr('{0}，有风', tr(s));
+    return tr(s);
   }
 
   // ---------- particles (view space, map px) ----------

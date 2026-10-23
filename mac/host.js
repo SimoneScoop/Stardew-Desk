@@ -23,7 +23,7 @@ var sceneDir = null;          // where the scene runs from: code copied from the
 var codeDir = null;           // the scene code shipped inside the app (or the project folder when debugging)
 var musicScript = null;       // musicx.js
 var SUPPORT = $.NSHomeDirectory().js + '/Library/Application Support/Stardew Desk';
-var DATA_VERSION = '7';       // must match scene/setup.js
+var DATA_VERSION = '9';       // must match scene/setup.js
 var setup = null;             // first-run window: {win, wv, ucc, tried}
 var scenes = [];           // {screen, frame, win, wv, ready, fps, cursor}
 var coverage = [];         // per scene, 0..1
@@ -38,6 +38,7 @@ var statusItem = null;
 var cursorTimer = null;
 var cursorInterval = 0;
 var editor = null;         // settings window: {win, wv, ucc, ready}
+var todoWin = null;        // the add-a-to-do box: {win, wv, ucc, ready}
 var saver = null;          // running screensaver: {views: [...], prevApp, started, lastIdle, alpha, closing}
 var saverBlockedUntil = 0; // don't re-check for video playback every second
 var timeOverride = null;   // simulated hour from the settings window (not saved)
@@ -62,6 +63,16 @@ function guard(name, fn) {
     try { return fn.apply(null, arguments); } catch (e) { log('错误 [' + name + ']: ' + e + (e && e.line ? ' @' + e.line : '')); }
   };
 }
+// NSAlert.runModal called synchronously from inside a menu item's own click handler
+// (the status-bar menu is still tearing down its tracking session at that instant) is a
+// fragile pattern on recent macOS/Apple Silicon — it can crash instead of just showing
+// the alert. Scheduling the call one runloop tick later, after the menu has fully
+// closed, avoids it.
+var pendingModal = null;
+function deferModal(fn) {
+  pendingModal = fn;
+  $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.05, target, 'runDeferred:', NIL, false);
+}
 
 // ---------- settings (NSUserDefaults) ----------
 var defaults = $.NSUserDefaults.standardUserDefaults;
@@ -70,6 +81,9 @@ function getStr(key, fallback) {
   return v && !v.isNil() ? v.js : fallback;
 }
 function setStr(key, v) { defaults.setObjectForKey($(v), key); }
+// Write the settings to disk now (macOS batches them; before quitting or reinstalling,
+// and after a layout change, we don't want to rely on that).
+function flushSettings() { try { defaults.synchronize; } catch (e) { /* ignore */ } }
 function getBool(key, fallback) {
   return defaults.objectForKey(key).isNil() ? fallback : defaults.boolForKey(key);
 }
@@ -78,6 +92,35 @@ function setBool(key, v) { defaults.setBoolForKey(v, key); }
 var PETS = [['cat0', '橘猫'], ['cat1', '灰猫'], ['cat2', '黄猫'], ['cat3', '白猫'], ['cat4', '黑猫'], ['cat5', '紫猫'],
   ['dog0', '黄狗'], ['dog1', '牧羊犬'], ['dog2', '金毛'], ['dog3', '黑白花狗'], ['dog4', '棕狗'], ['dog5', '紫狗'], ['none', '不养']];
 var MUSIC_VOL = { low: 0.12, mid: 0.25, high: 0.45 };
+
+// ---------- 语言 / Language ----------
+// scene/i18n.js + i18n-en.js, shared with the pages: L('下班 {0}', t) is the line in the
+// chosen language. S.lang: 'auto' (the Mac's language), 'zh' or 'en'.
+var i18nCache = null;
+function i18n() {
+  if (i18nCache || !codeDir) return i18nCache;
+  try {
+    i18nCache = eval('(function () {' + readText(codeDir + '/i18n.js') + '\n' + (readText(codeDir + '/i18n-en.js') || '') + '\n;return SDV_I18N; })()');
+    i18nCache.set(curLang());
+  } catch (e) { log('读不了语言文件：' + e); }
+  return i18nCache;
+}
+function systemLang() { try { return $.NSLocale.preferredLanguages.firstObject.js; } catch (e) { return 'zh'; } }
+function curLang() { var p = S.lang; return p === 'zh' || p === 'en' ? p : (/^zh/i.test(systemLang()) ? 'zh' : 'en'); }
+function L(k) {
+  var x = i18n(), a = Array.prototype.slice.call(arguments, 1);
+  if (x) return x.L.apply(null, arguments);
+  return String(k).replace(/\{(\d+)\}/g, function (m, i) { return a[Number(i)] == null ? '' : String(a[Number(i)]); });
+}
+function setLang(pref) {
+  S.lang = pref === 'zh' || pref === 'en' ? pref : 'auto';
+  if (i18n()) i18nCache.set(curLang());
+  var js = 'SDV.host.apply("lang",' + JSON.stringify(curLang()) + ')';
+  callAll(js); editorCall(js);
+  if (saver) saver.views.forEach(function (v) { if (v.ready) v.wv.evaluateJavaScriptCompletionHandler($(js), noop); });
+  if (editor) editor.win.title = $(L('{0} 设置', APP_NAME));
+  music.status = ''; pushMusicState();
+}
 var QUALITY = { eco: { fps: 10, title: '省电（10 fps）' }, balanced: { fps: 15, title: '平衡（15 fps）' }, smooth: { fps: 30, title: '流畅（30 fps）' } };
 function reduceMotion() {
   try { return $.NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion; } catch (e) { return false; }
@@ -91,7 +134,9 @@ var S = {
   set season(v) { setStr('season', v); },
   get weather() { return getStr('weather', 'live'); },
   set weather(v) { setStr('weather', v); },
-  get saverMinutes() { var v = defaults.objectForKey('saverMinutes'); return v.isNil() ? 5 : defaults.integerForKey('saverMinutes'); },
+  // integerForKey comes back from the ObjC bridge as a wrapped object, not a JS number:
+  // it prints as "0" but !value is false, so 关闭 (0) never stopped the idle check.
+  get saverMinutes() { var v = defaults.objectForKey('saverMinutes'); return v.isNil() ? 5 : Number(ObjC.unwrap(defaults.integerForKey('saverMinutes'))) || 0; },
   set saverMinutes(v) { defaults.setIntegerForKey(v, 'saverMinutes'); },
   get focus() { try { return JSON.parse(getStr('focus', 'null')); } catch (e) { return null; } },
   set focus(v) { setStr('focus', JSON.stringify(v || null)); },
@@ -105,12 +150,23 @@ var S = {
   set contentDir(v) { setStr('contentDir', v || ''); },
   get music() { var m = getStr('music', 'off'); return m === 'always' || m === 'saver' ? m : 'off'; },
   set music(v) { setStr('music', v); },
+  get lang() { var v = getStr('lang', 'auto'); return v === 'zh' || v === 'en' ? v : 'auto'; },
+  set lang(v) { setStr('lang', v); flushSettings(); },
   get musicVolume() { var v = getStr('musicVolume', 'mid'); return MUSIC_VOL[v] ? v : 'mid'; },
+  // which tracks: {mode: 'season' | 'list', list: [ids], order: 'shuffle' | 'order'}
+  get musicPick() { try { return normalizePick(JSON.parse(getStr('musicPick', 'null'))); } catch (e) { return normalizePick(null); } },
+  set musicPick(v) { setStr('musicPick', JSON.stringify(normalizePick(v))); flushSettings(); },
   set musicVolume(v) { setStr('musicVolume', v); },
   get pet() { return getStr('pet', 'cat0'); },
   set pet(v) { setStr('pet', v); },
+  // 镜头跟随鼠标: the desktop view leans toward the cursor
+  get follow() { return getBool('follow', false); },
+  set follow(v) { setBool('follow', v); flushSettings(); },
   get layout() { try { return JSON.parse(getStr('layout', '{}')) || {}; } catch (e) { return {}; } },
-  set layout(v) { setStr('layout', JSON.stringify(v || {})); },
+  set layout(v) { setStr('layout', JSON.stringify(v || {})); flushSettings(); },
+  // 我的布局: named copies of layouts and automatic backups (kept by the settings page)
+  get layouts() { try { var v = JSON.parse(getStr('layouts', '[]')); return Array.isArray(v) ? v : []; } catch (e) { return []; } },
+  set layouts(v) { setStr('layouts', JSON.stringify(Array.isArray(v) ? v : [])); flushSettings(); },
   get board() { try { return JSON.parse(getStr('board', 'null')); } catch (e) { return null; } },
   set board(v) { setStr('board', JSON.stringify(v || null)); },
   get frame() { try { return JSON.parse(getStr('frame', 'null')); } catch (e) { return null; } },
@@ -180,7 +236,7 @@ function openEditor() {
     var rect = $.NSMakeRect(0, 0, cw, ch);
     // titled | closable | miniaturizable | resizable
     var win = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(rect, 1 | 2 | 4 | 8, 2, false);
-    win.title = $(APP_NAME + ' 设置');
+    win.title = $(L('{0} 设置', APP_NAME));
     win.releasedWhenClosed = false;
     win.contentAspectRatio = $.NSMakeSize(sf.size.width, sf.size.height);
     var web = makeWebView(cw, ch, 'editor');
@@ -205,6 +261,12 @@ function applySetting(key, value) {
   else if (key === 'pet') S.pet = value || 'cat0';
   else if (key === 'time') timeOverride = value == null ? null : value;
   else if (key === 'board') { boardTicked(S.board, value); S.board = value; }
+  else if (key === 'layouts') { S.layouts = value; return; }   // only the settings page shows them
+  else if (key === 'follow') S.follow = Boolean(value);
+  else if (key === 'music') { S.music = value === 'always' || value === 'saver' ? value : 'off'; music.gapUntil = 0; music.failed = {}; musicTick(); pushMusicState(); return; }
+  else if (key === 'musicVolume') { if (MUSIC_VOL[value]) { S.musicVolume = value; if (music.player) music.player.volume = MUSIC_VOL[value]; } pushMusicState(); return; }
+  else if (key === 'lang') { setLang(value); return; }
+  else if (key === 'musicPick') { S.musicPick = value; music.gapUntil = 0; musicTick(); pushMusicState(); return; }
   else return;
   callAll('SDV.host.apply(' + JSON.stringify(key) + ',' + JSON.stringify(value == null ? null : value) + ')');
 }
@@ -212,6 +274,7 @@ function applySetting(key, value) {
 // Everything a freshly loaded scene needs to match the others.
 function settingsScript() {
   var js = [
+    'SDV.host.apply("lang",' + JSON.stringify(curLang()) + ')',
     'SDV.host.apply("season",' + JSON.stringify(S.season) + ')',
     'SDV.host.apply("weather",' + JSON.stringify(S.weather) + ')',
     'SDV.host.apply("time",' + JSON.stringify(timeOverride) + ')',
@@ -220,6 +283,9 @@ function settingsScript() {
   var al = autoLocation();
   if (al) js.push('SDV.host.apply("location",' + JSON.stringify(al) + ')');
   js.push('SDV.host.apply("layout",' + JSON.stringify(S.layout) + ')');
+  js.push('SDV.host.apply("layouts",' + JSON.stringify(S.layouts) + ')');
+  js.push('SDV.host.apply("follow",' + JSON.stringify(S.follow) + ')');
+  js.push('SDV.host.apply("musicState",' + JSON.stringify(musicState()) + ')');
   js.push('SDV.host.apply("pet",' + JSON.stringify(S.pet) + ')');
   js.push('SDV.host.apply("board",' + JSON.stringify(S.board) + ')');
   js.push('SDV.host.mail(' + Math.max(0, mail.lastCount) + ')');
@@ -260,10 +326,10 @@ function call(s, js) {
 }
 function callAll(js) { scenes.forEach(function (s) { call(s, js); }); }
 
-function setFps(s, fps) {
+function setFps(s, fps, reason) {
   if (fps <= 0 && catcher && catcher.scene === s) hideCatcher();
   if (!s.ready || fps === s.fps) return;
-  log('场景渲染频率变化：' + s.fps + ' → ' + fps + ' FPS');
+  log('场景渲染频率变化：' + s.fps + ' → ' + fps + ' FPS' + (reason ? '（' + reason + '）' : ''));
   s.fps = fps;
   call(s, 'SDV.host.setFps(' + fps + ')');
 }
@@ -276,6 +342,7 @@ function pushSettings(s) {
 
 function onMessage(wv, body) {
   if (setup && setup.wv.isEqual(wv)) { onSetupMessage(body || {}); return; }
+  if (todoWin && todoWin.wv.isEqual(wv)) { onTodoMessage(body); return; }
   if (saver) {
     for (var j = 0; j < saver.views.length; j++) {
       var v = saver.views[j];
@@ -293,10 +360,20 @@ function onMessage(wv, body) {
       var f = editor.screen.frame, k = editor.screen.backingScaleFactor;
       editorCall('SDV.host.setTarget(' + Math.round(f.size.width * k) + ',' + Math.round(f.size.height * k) + ');' + settingsScript());
       if (boardPanelWanted) { boardPanelWanted = false; editorCall('SDV.host.openBoard()'); }
+      if (musicPanelWanted) { musicPanelWanted = false; editorCall('SDV.host.openTab("music")'); }
+      music.status = '';
     } else if (body && body.type === 'setting') {
       applySetting(body.key, body.value);
     } else if (body && body.type === 'mailRead') {
       markMailRead();
+    } else if (body && body.type === 'importSave') {
+      later(importSaveDialog);
+    } else if (body && body.type === 'musicPlay') {
+      musicPlay(String(body.id || ''));
+    } else if (body && body.type === 'musicNext') {
+      musicNext();
+    } else if (body && body.type === 'musicStop') {
+      music.request = null; if (S.music !== 'off') { music.gapUntil = Date.now() + 60000; } musicStop(true);
     }
     return;
   }
@@ -325,7 +402,22 @@ function onMessage(wv, body) {
     setCatcher(s, body.rect || null);
   } else if (body.type === 'board') {
     setBoard(body.value);               // a to-do ticked on the desktop
+  } else if (body.type === 'boardAdd') {
+    hideCatcher();
+    later(function () { addTodoDialog(); });    // "＋ 添加待办" on the notice
   }
+}
+
+// Run fn once the current event is handled (a dialog shouldn't open from inside a web
+// view's message callback).
+var laterQueue = [];
+function later(fn) {
+  laterQueue.push(fn);
+  $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.05, target, 'later:', NIL, false);
+}
+function runLater() {
+  var q = laterQueue; laterQueue = [];
+  q.forEach(function (fn) { guard('later', fn)(); });
 }
 
 // ---------- click catcher for the bulletin board ----------
@@ -362,6 +454,17 @@ function setCatcher(s, r) {
 }
 function hideCatcher() {
   if (catcher && catcher.rect) { catcher.win.orderOut(NIL); catcher.rect = null; }
+}
+var lastScrollAt = 0;
+function catcherScroll(ev) {
+  if (!catcher || !catcher.rect) return;
+  var dy = Number(ev.scrollingDeltaY) || 0;
+  if (!dy) return;
+  var now = Date.now();
+  if (now - lastScrollAt < 110) return;        // one row per flick, not per pixel
+  lastScrollAt = now;
+  var p = ev.locationInWindow, r = catcher.rect;
+  call(catcher.scene, 'SDV.host.wheel(' + Math.round(r.x + p.x) + ',' + Math.round(r.y + r.h - p.y) + ',' + (dy > 0 ? -1 : 1) + ')');
 }
 function catcherClick(ev) {
   if (!catcher || !catcher.rect) return;
@@ -420,8 +523,8 @@ function currentSeason() {
 }
 function todayKey() { var d = new Date(); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
 function todayLog() {
-  var L = S.focusLog;
-  return L && L.day === todayKey() ? L : { day: todayKey(), n: 0, last: null, crops: {} };
+  var LG = S.focusLog;
+  return LG && LG.day === todayKey() ? LG : { day: todayKey(), n: 0, last: null, crops: {} };
 }
 function focusPayload() {
   var f = S.focus || {}, o = {};
@@ -446,10 +549,10 @@ function focusTick() {
   var now = Date.now() / 1000;
   if (!f.done && now >= f.start + f.dur) {
     f.done = true; f.doneAt = now; S.focus = f;
-    var L = todayLog();
-    L.n += 1; L.last = f.crop; L.crops[f.crop] = (L.crops[f.crop] || 0) + 1;
-    S.focusLog = L;
-    notifyUser('专注完成', '收获了一个' + f.cropZh + ' · 今天第 ' + L.n + ' 次');
+    var LG = todayLog();
+    LG.n += 1; LG.last = f.crop; LG.crops[f.crop] = (LG.crops[f.crop] || 0) + 1;
+    S.focusLog = LG;
+    notifyUser('专注完成', L('收获了一个{0} · 今天第 {1} 次', L(f.cropZh), LG.n));
     pushFocus();
   } else if (f.done && now - f.doneAt > 600) {
     S.focus = null;          // shipped
@@ -460,21 +563,21 @@ function notifyUser(title, text, silent) {
   try {
     var a = Application.currentApplication();
     a.includeStandardAdditions = true;
-    a.displayNotification(text, silent ? { withTitle: title } : { withTitle: title, soundName: 'Glass' });
+    a.displayNotification(L(text), silent ? { withTitle: L(title) } : { withTitle: L(title), soundName: 'Glass' });
   } catch (e) { log('通知失败：' + e); }
 }
 function focusSummary() {
-  var L = todayLog();
-  var parts = Object.keys(L.crops).map(function (k) { return L.crops[k] + ' 个' + (CROP_ZH[k] || k); });
-  if (L.notes) parts.push(L.notes + ' 张做完的待办');
-  return parts.join('、');
+  var T = todayLog();
+  var parts = Object.keys(T.crops).map(function (k) { return L('{0} 个{1}', T.crops[k], L(CROP_ZH[k] || k)); });
+  if (T.notes) parts.push(L('{0} 张做完的待办', T.notes));
+  return parts.join(curLang() === 'en' ? ', ' : '、');
 }
-function shippedToday() { var L = todayLog(); return L.n + (L.notes || 0); }
+function shippedToday() { var LG = todayLog(); return LG.n + (LG.notes || 0); }
 
 // ---------- bulletin board: to-dos and the countdown to the end of the day ----------
 // The scenes draw the board (scene/board.js); the data lives here so the menu can tick
 // to-dos off and the end-of-day notification fires even while the scenes are paused.
-var boardPanelWanted = false;
+var boardPanelWanted = false, musicPanelWanted = false;
 function boardData() {
   var b = S.board || {};
   b.todos = b.todos || [];
@@ -512,7 +615,7 @@ function boardTodos(b) {
   var t = todayKey();
   return b.todos.filter(function (x) { return !x.done || x.doneDay === t; });
 }
-function yuan(v) { return Math.floor(v + 1e-9) + '金'; }   // whole gold, as the game shows money
+function yuan(v) { return L('{0}金', Math.floor(v + 1e-9)); }   // whole gold, as the game shows money
 function hmLeft(sec) { sec = Math.max(0, Math.ceil(sec / 60)); return Math.floor(sec / 60) + ':' + ('0' + sec % 60).slice(-2); }
 // Every few seconds: drop yesterday's finished to-dos, and say when the day is done.
 function boardTick() {
@@ -522,13 +625,15 @@ function boardTick() {
   var keep = (b.todos || []).filter(function (x) { return !x.done || x.doneDay === t; });
   var changed = keep.length !== (b.todos || []).length;
   if (b.today && b.today.day !== t) { b.today = null; changed = true; }
-  if (changed) { b.todos = keep; setBoard(b); }
+  b.todos = keep;
+  if (todoReminders(b)) changed = true;
+  if (changed) setBoard(b);
   var P = boardPay(boardData(), new Date());
   if (P && P.status === 'after' && b.remind !== false && P.sinceEnd < 1800 && getStr('boardNotified', '') !== t) {
     setStr('boardNotified', t);
     var left = boardTodos(b).filter(function (x) { return !x.done; }).length;
     var rang = playSfx('offwork', b);
-    notifyUser('下班啦', (b.showMoney !== false && P.daily ? '今天挣了 ' + yuan(P.daily) + '，' : '') + (left ? '还有 ' + left + ' 件待办留到明天' : '辛苦了'), rang);
+    notifyUser('下班啦', (b.showMoney !== false && P.daily ? L('今天挣了 {0}，', yuan(P.daily)) : '') + (left ? L('还有 {0} 件待办留到明天', left) : L('辛苦了')), rang);
   }
 }
 // A to-do ticked off (anywhere: desktop, menu, settings window): the game's coin
@@ -543,31 +648,160 @@ function boardTicked(before, after) {
     else if (!t.done && was[t.id]) minus++;
   });
   if (!plus && !minus) return;
-  var L = todayLog();
-  L.notes = Math.max(0, (L.notes || 0) + plus - minus);
-  S.focusLog = L;
+  var LG = todayLog();
+  LG.notes = Math.max(0, (LG.notes || 0) + plus - minus);
+  S.focusLog = LG;
   pushFocus();
   if (plus) playSfx('tick', after);
 }
-// Leaf menu → 公告板 → 添加待办…: a small box, Return adds it.
+// Leaf menu → 公告板 → 添加待办…, or「＋ 添加待办」on the desktop board: a small box,
+// Return adds it. Ticking「到点提醒」(or touching the time) sets a reminder.
+var todoCheck = null;
+function defaultTodoAt() { var d = new Date(Date.now() + 20 * 60000); d.setSeconds(0, 0); d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15); return d.getTime(); }
+// The box is a small page (scene/todo.html) in the bulletin board's own look; the
+// native alert below stays as the fallback.
 function addTodoDialog() {
+  try { openTodoWindow(); } catch (e) { log('添加待办窗口打不开，改用系统对话框：' + e); addTodoAlert(); }
+}
+function openTodoWindow() {
+  var app = $.NSApplication.sharedApplication;
+  app.activateIgnoringOtherApps(true);
+  if (todoWin) { todoWin.win.makeKeyAndOrderFront(NIL); return; }
+  var w = 440, h = 310;
+  // titled | closable | full-size content: a real window that takes the keyboard, with the
+  // title bar made see-through and its buttons hidden so only the wood shows
+  var win = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer($.NSMakeRect(0, 0, w, h), 1 | 2 | (1 << 15), 2, false);
+  win.title = $(L('添加待办'));
+  win.titlebarAppearsTransparent = true;
+  win.titleVisibility = 1;
+  win.movableByWindowBackground = true;
+  win.releasedWhenClosed = false;
+  win.opaque = false;
+  win.backgroundColor = $.NSColor.clearColor;
+  win.level = 3;                               // above the other windows, like the alert was
+  for (var b = 0; b < 3; b++) { try { win.standardWindowButton(b).hidden = true; } catch (e) { /* ignore */ } }
+  var web = makeWebView(w, h, 'todo', 'todo.html');
+  try { web.wv.setValueForKey($.NSNumber.numberWithBool(false), 'drawsBackground'); } catch (e) { /* ignore */ }
+  win.contentView = web.wv;
+  win.center;
+  todoWin = { win: win, wv: web.wv, ucc: web.ucc, ready: false };
+  win.makeKeyAndOrderFront(NIL);
+}
+function closeTodoWindow() {
+  var t = todoWin;
+  todoWin = null;
+  if (!t) return;
+  try { t.ucc.removeScriptMessageHandlerForName('sdv'); } catch (e) { /* ignore */ }
+  t.win.orderOut(NIL);
+  t.win.close;
+}
+function onTodoMessage(body) {
+  if (!body) return;
+  if (body.type === 'hello') {
+    todoWin.ready = true;
+    todoWin.wv.evaluateJavaScriptCompletionHandler($('SDV_TODO.init(' + JSON.stringify({ lang: curLang(), at: defaultTodoAt() }) + ')'), noop);
+  } else if (body.type === 'todoAdd') {
+    var text = String(body.text || '').trim().slice(0, 40);
+    later(closeTodoWindow);
+    if (text) addTodo(text, Number(body.at) || null);
+  } else if (body.type === 'todoCancel') {
+    later(closeTodoWindow);
+  }
+}
+function addTodo(text, at) {
+  var b = boardData();
+  var t = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), text: text, done: false };
+  if (at && at > 0) t.at = at;
+  b.todos.push(t);
+  setBoard(b);
+  log('添加待办「' + text + '」' + (t.at ? '，' + new Date(t.at).toString() + ' 提醒' : ''));
+}
+function addTodoAlert() {
   var app = $.NSApplication.sharedApplication;
   app.activateIgnoringOtherApps(true);
   var alert = $.NSAlert.alloc.init;
-  alert.messageText = $('添加今日待办');
-  alert.informativeText = $('写一件今天要做的事，回车添加。');
-  alert.addButtonWithTitle($('添加'));
-  alert.addButtonWithTitle($('取消'));
-  var tf = $.NSTextField.alloc.initWithFrame($.NSMakeRect(0, 0, 280, 24));
-  tf.placeholderString = $('比如：回复邮件');
-  alert.accessoryView = tf;
+  alert.messageText = $(L('添加待办'));
+  alert.informativeText = $(L('写一件要做的事，回车添加。\n要提醒的话勾上「到点提醒」，再选个时间。'));
+  alert.addButtonWithTitle($(L('添加')));
+  alert.addButtonWithTitle($(L('取消')));
+  var box = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, 300, 62));
+  var tf = $.NSTextField.alloc.initWithFrame($.NSMakeRect(0, 36, 300, 24));
+  tf.placeholderString = $(L('比如：回复邮件'));
+  box.addSubview(tf);
+  var cb = null, dp = null, tt = null;
+  try {
+    cb = $.NSButton.alloc.initWithFrame($.NSMakeRect(0, 4, 96, 22));
+    cb.setButtonType(3);                       // a checkbox
+    cb.title = $(L('到点提醒'));
+    box.addSubview(cb);
+    dp = $.NSDatePicker.alloc.initWithFrame($.NSMakeRect(100, 2, 200, 26));
+    dp.datePickerStyle = 0;                    // text field with stepper
+    dp.datePickerElements = 0x00e0 | 0x000c;   // year-month-day, hour-minute
+    dp.dateValue = $.NSDate.dateWithTimeIntervalSince1970(defaultTodoAt() / 1000);
+    todoCheck = cb;
+    try { dp.target = target; dp.action = 'todoTimeChanged:'; } catch (e) { /* the checkbox alone will do */ }
+    box.addSubview(dp);
+  } catch (e) {
+    log('时间选择器不可用，改用文字输入：' + e);
+    dp = null; cb = null;
+    tt = $.NSTextField.alloc.initWithFrame($.NSMakeRect(0, 2, 300, 24));
+    tt.placeholderString = $(L('提醒时间（可不填），比如 15:30 或 明天 9:00'));
+    box.addSubview(tt);
+  }
+  alert.accessoryView = box;
   alert.window.initialFirstResponder = tf;
-  var r = alert.runModal;
-  var text = tf.stringValue.js.trim().slice(0, 40);
-  if (r !== 1000 || !text) return;
-  var b = boardData();
-  b.todos.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), text: text, done: false });
-  setBoard(b);
+  var resp = Number(alert.runModal);
+  todoCheck = null;
+  var text = String(ObjC.unwrap(tf.stringValue) || '').trim().slice(0, 40);
+  if (resp === 1001 || !text) return;
+  var at = null;
+  if (cb && dp && Number(cb.state) === 1) at = Math.round(Number(dp.dateValue.timeIntervalSince1970) * 1000);
+  else if (tt) at = parseTodoTime(String(ObjC.unwrap(tt.stringValue) || ''));
+  addTodo(text, at);
+}
+// "15:30", "明天 9:00", "9点半" → ms, or null.
+function parseTodoTime(s) {
+  s = s.trim();
+  if (!s) return null;
+  var m = /(\d{1,2})\s*(?:[:：点]\s*(\d{1,2}|半)?|(?=\s*(?:am|pm)))/i.exec(s);
+  if (!m) return null;
+  var d = new Date();
+  if (/明天|tomorrow/i.test(s)) d.setDate(d.getDate() + 1);
+  else if (/后天/.test(s)) d.setDate(d.getDate() + 2);
+  var h = Number(m[1]), mi = m[2] === '半' ? 30 : Number(m[2] || 0);
+  if (/下午|晚上|pm/i.test(s) && h < 12) h += 12;
+  if (/am/i.test(s) && h === 12) h = 0;
+  d.setHours(h, mi, 0, 0);
+  if (!/明天|后天|tomorrow/i.test(s) && d.getTime() < Date.now() - 60000) d.setDate(d.getDate() + 1);   // already past today: tomorrow
+  return d.getTime();
+}
+// A to-do's time, short: "15:00", "明天 9:00", "10/23 9:00".
+function todoTimeLabel(at) {
+  var d = new Date(at), n = new Date();
+  var hm = d.getHours() + ':' + ('0' + d.getMinutes()).slice(-2);
+  var days = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - new Date(n.getFullYear(), n.getMonth(), n.getDate())) / 864e5);
+  return days === 0 ? hm : days === 1 ? L('明天 {0}', hm) : days === -1 ? L('昨天 {0}', hm) : (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hm;
+}
+// Every few seconds (boardTick): a to-do whose time has come gets its notification once.
+// One missed while the Mac slept or the app was closed still comes, saying so; one more
+// than a day late is let go quietly.
+function todoReminders(b) {
+  var now = Date.now(), changed = false;
+  (b.todos || []).forEach(function (t) {
+    if (!t.at || t.done || t.reminded || t.at > now) return;
+    t.reminded = true; changed = true;
+    var late = now - t.at;
+    if (late > 864e5) return;
+    var rang = playSfx('tick', b);
+    notifyUser('⏰ 待办提醒', t.text + (late > 10 * 60000 ? L('（原定 {0}，刚才没能提醒）', todoTimeLabel(t.at)) : ''), rang);
+    // macOS quietly drops notifications from an app that isn't allowed to send them, so
+    // the farm shows its own slip over the board as well — that one always arrives.
+    var js = 'SDV.host.remind(' + JSON.stringify(t.text) + ',' + JSON.stringify(t.id) + ')';
+    callAll(js);
+    editorCall(js);
+    log('待办提醒：' + t.text);
+  });
+  return changed;
 }
 
 // ---------- sound effects from the game ----------
@@ -613,23 +847,23 @@ function playSfx(name, b) {
 function boardMenu(menu) {
   var b = boardData(), P = boardPay(b, new Date()), list = boardTodos(b);
   var open = list.filter(function (x) { return !x.done; }).length;
-  var title = '公告板';
-  if (P && P.status === 'work') title += ' · 还有 ' + hmLeft(P.toEnd) + ' 下班';
-  else if (P && P.status === 'lunch') title += ' · 午休中';
-  else if (P && P.status === 'after') title += ' · 下班啦';
-  else if (P && P.status === 'rest') title += ' · 今天休息';
-  else if (open) title += ' · 待办 ' + open;
-  var sub = $.NSMenu.alloc.initWithTitle($('公告板'));
+  var title = L('公告板');
+  if (P && P.status === 'work') title += L(' · 还有 {0} 下班', hmLeft(P.toEnd));
+  else if (P && P.status === 'lunch') title += L(' · 午休中');
+  else if (P && P.status === 'after') title += L(' · 下班啦');
+  else if (P && P.status === 'rest') title += L(' · 今天休息');
+  else if (open) title += L(' · 待办 {0}', open);
+  var sub = $.NSMenu.alloc.initWithTitle($(L('公告板')));
   sub.autoenablesItems = false;
   if (!list.length) addItem(sub, '今天还没有待办');
   list.slice().sort(function (a, c) { return Number(Boolean(a.done)) - Number(Boolean(c.done)); }).slice(0, 12).forEach(function (x) {
-    addItem(sub, x.text, 'menuAction:', 'todo:' + x.id, x.done);
+    addItem(sub, (x.at ? '⏰' + todoTimeLabel(x.at) + ' ' : '') + x.text, 'menuAction:', 'todo:' + x.id, x.done);
   });
   if (P) {
     sub.addItem($.NSMenuItem.separatorItem);
-    if (P.status !== 'rest' && b.showMoney !== false && P.daily) addItem(sub, '今日已挣 ' + yuan(P.status === 'after' ? P.daily : P.earned) + ' / ' + yuan(P.daily));
-    if (P.status === 'work') addItem(sub, '下班倒计时 ' + hmLeft(P.toEnd));
-    else if (P.status === 'before') addItem(sub, '还没上班 · ' + hmLeft(P.toStart) + ' 后开始');
+    if (P.status !== 'rest' && b.showMoney !== false && P.daily) addItem(sub, L('今日已挣 {0} / {1}', yuan(P.status === 'after' ? P.daily : P.earned), yuan(P.daily)));
+    if (P.status === 'work') addItem(sub, L('下班倒计时 {0}', hmLeft(P.toEnd)));
+    else if (P.status === 'before') addItem(sub, L('还没上班 · {0} 后开始', hmLeft(P.toStart)));
     if (b.today && b.today.day === todayKey()) addItem(sub, '今天恢复平常安排', 'menuAction:', 'boardDay:auto');
     else if (P.scheduled) addItem(sub, '今天请假 / 调休（不算工资）', 'menuAction:', 'boardDay:off');
     else addItem(sub, '今天调休要上班', 'menuAction:', 'boardDay:work');
@@ -650,7 +884,7 @@ function boardAction(kind, val) {
     b.today = val === 'auto' ? null : { day: todayKey(), mode: val };
     setBoard(b);
   } else if (kind === 'boardAdd') {
-    addTodoDialog();
+    deferModal(addTodoDialog);
   } else if (kind === 'boardSound') {
     b.sound = !sfxOn(b);
     setBoard(b);
@@ -763,7 +997,7 @@ var CN_CITIES = {
 function currentLocation() { return autoLocation() || DEFAULT_LOC; }
 function locationLabel() {
   if (S.location && S.location.name) return S.location.name;
-  return autoLocation() ? '跟随时区自动' : '杭州（默认）';
+  return L(autoLocation() ? '跟随时区自动' : '杭州（默认）');
 }
 function setLocation(loc) {
   log('设置天气城市：' + JSON.stringify(loc));
@@ -781,16 +1015,16 @@ function setLocation(loc) {
 }
 function infoAlert(title, text) {
   var alert = $.NSAlert.alloc.init;
-  alert.messageText = $(title);
-  alert.informativeText = $(text);
-  alert.addButtonWithTitle($('好'));
+  alert.messageText = $(L(title));
+  alert.informativeText = $(L(text));
+  alert.addButtonWithTitle($(L('好')));
   alert.runModal;
 }
 // Open-Meteo place-name search. Returns a list, or null when the network failed.
 function geocode(name) {
   var tmp = $.NSTemporaryDirectory().js + 'stardewdesk-geo.json';
   fm.removeItemAtPathError($(tmp), null);
-  var url = 'https://geocoding-api.open-meteo.com/v1/search?count=10&language=zh&format=json&name=' + encodeURIComponent(name);
+  var url = 'https://geocoding-api.open-meteo.com/v1/search?count=10&language=' + curLang() + '&format=json&name=' + encodeURIComponent(name);
   var t = $.NSTask.alloc.init;
   t.launchPath = '/usr/bin/curl';
   t.arguments = $(['-sS', '-m', '10', '-o', tmp, url]);
@@ -802,9 +1036,9 @@ function geocode(name) {
 }
 function chooseCity(list) {
   var alert = $.NSAlert.alloc.init;
-  alert.messageText = $('找到好几个，选一个');
-  alert.addButtonWithTitle($('确定'));
-  alert.addButtonWithTitle($('取消'));
+  alert.messageText = $(L('找到好几个，选一个'));
+  alert.addButtonWithTitle($(L('确定')));
+  alert.addButtonWithTitle($(L('取消')));
   var pop = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(0, 0, 320, 26), false);
   list.forEach(function (r, i) {
     var label = [r.name, r.admin1, r.country].filter(function (x) { return x; }).join(' · ');
@@ -818,12 +1052,12 @@ function cityDialog() {
   var app = $.NSApplication.sharedApplication;
   app.activateIgnoringOtherApps(true);
   var alert = $.NSAlert.alloc.init;
-  alert.messageText = $('天气跟着哪个城市？');
-  alert.informativeText = $('输入城市名，比如：北京、苏州、成都。\n国外城市也可以用英文，比如 Tokyo、London。');
-  alert.addButtonWithTitle($('确定'));
-  alert.addButtonWithTitle($('取消'));
+  alert.messageText = $(L('天气跟着哪个城市？'));
+  alert.informativeText = $(L('输入城市名，比如：北京、苏州、成都。\n国外城市也可以用英文，比如 Tokyo、London。'));
+  alert.addButtonWithTitle($(L('确定')));
+  alert.addButtonWithTitle($(L('取消')));
   var tf = $.NSTextField.alloc.initWithFrame($.NSMakeRect(0, 0, 280, 24));
-  tf.placeholderString = $('城市名');
+  tf.placeholderString = $(L('城市名'));
   if (S.location && S.location.name) tf.stringValue = $(S.location.name);
   alert.accessoryView = tf;
   alert.window.initialFirstResponder = tf;
@@ -835,7 +1069,7 @@ function cityDialog() {
   if (CN_CITIES[key]) { setLocation({ name: key, lat: CN_CITIES[key][0], lon: CN_CITIES[key][1] }); cityDone(); return; }
   var res = geocode(text);
   if (res === null) { infoAlert('没连上网络', '这个城市要联网查一下位置，请检查网络后再试。'); return; }
-  if (!res.length) { infoAlert('没找到「' + text + '」', '换个写法试试：去掉「市」「县」，或者用拼音、英文。'); return; }
+  if (!res.length) { infoAlert(L('没找到「{0}」', text), '换个写法试试：去掉「市」「县」，或者用拼音、英文。'); return; }
   // biggest places first, so「伦敦」lists London, UK before the small towns named after it
   res.sort(function (a, b) { return (b.population || 0) - (a.population || 0); });
   var pick = res.length > 1 ? chooseCity(res) : res[0];
@@ -843,8 +1077,92 @@ function cityDialog() {
   setLocation({ name: pick.name, lat: Math.round(pick.latitude * 100) / 100, lon: Math.round(pick.longitude * 100) / 100 });
   cityDone();
 }
+// ---------- 从存档导入布局 ----------
+// The settings page asks; we list the saves on this Mac, the user picks one, and the
+// page gets what scene/savefile.js read from it (buildings, animals, pet). Read-only.
+var saveReader = null;
+function saveApi() {
+  if (saveReader) return saveReader;
+  var src = readText(codeDir + '/savefile.js');
+  if (!src) throw new Error('找不到 savefile.js');
+  saveReader = (new Function(src + '\nreturn SDV_SAVE;'))();
+  return saveReader;
+}
+function savesDir() { return $.NSHomeDirectory().js + '/.config/StardewValley/Saves'; }
+var SEASON_ZH = { spring: '春', summer: '夏', fall: '秋', winter: '冬' };
+function listSaves() {
+  var dir = savesDir();
+  var names = ObjC.deepUnwrap(fm.contentsOfDirectoryAtPathError($(dir), null)) || [];
+  var out = [];
+  names.forEach(function (n) {
+    if (n[0] === '.') return;
+    var file = dir + '/' + n + '/' + n;
+    if (!exists(file)) return;
+    var info = null;
+    try { info = saveApi().info(readText(dir + '/' + n + '/SaveGameInfo') || ''); } catch (e) { info = null; }
+    var when = 0;
+    try { var at = fm.attributesOfItemAtPathError($(file), null); when = at && !at.isNil() ? Number(at.fileModificationDate.timeIntervalSince1970) : 0; } catch (e) { /* ignore */ }
+    var label = info && info.farmName ? L('{0}农场', info.farmName) + (info.name ? L('（{0}）', info.name) : '') : n.replace(/_\d+$/, '');
+    if (info && info.year) label += L(' · 第 {0} 年{1}{2}', info.year, L(SEASON_ZH[info.season] || ''), info.day ? L(' {0} 日', info.day) : '');
+    out.push({ file: file, label: label, when: when });
+  });
+  out.sort(function (a, b) { return b.when - a.when; });   // the one played last first
+  return out;
+}
+function importSaveDialog() {
+  var app = $.NSApplication.sharedApplication;
+  app.activateIgnoringOtherApps(true);
+  var list = [];
+  try { list = listSaves(); } catch (e) { log('列出存档失败：' + e); }
+  var alert = $.NSAlert.alloc.init;
+  alert.messageText = $(L('从存档导入布局'));
+  var pop = null;
+  if (list.length) {
+    alert.informativeText = $(L('选一个存档。只读取，不会改动存档。\n导入会替换现在的布局；现在的布局会先自动备份到「我的布局」。'));
+    alert.addButtonWithTitle($(L('导入')));
+    alert.addButtonWithTitle($(L('取消')));
+    alert.addButtonWithTitle($(L('选择其他文件…')));
+    pop = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(0, 0, 340, 26), false);
+    list.forEach(function (x, i) { pop.addItemWithTitle($((i + 1) + '. ' + x.label)); });
+    alert.accessoryView = pop;
+  } else {
+    alert.informativeText = $(L('在 ~/.config/StardewValley/Saves 里没找到存档。\n存档在别处的话，可以手动选择存档文件（存档文件夹里和文件夹同名的那个文件）。'));
+    alert.addButtonWithTitle($(L('选择存档文件…')));
+    alert.addButtonWithTitle($(L('取消')));
+  }
+  var resp = Number(alert.runModal);
+  var file = null;
+  if (list.length && resp === 1000) file = list[Number(pop.indexOfSelectedItem)].file;
+  else if ((list.length && resp === 1002) || (!list.length && resp === 1000)) file = chooseSaveFile();
+  if (!file) return;
+  log('从存档导入布局：' + file);
+  var msg;
+  try {
+    var text = readText(file);
+    if (!text) throw new Error(L('读不出这个文件'));
+    msg = { save: saveApi().parse(text) };
+    log('存档「' + msg.save.farmName + '」：' + msg.save.buildings.length + ' 座建筑');
+  } catch (e) {
+    log('读取存档失败：' + e);
+    msg = { error: L('读不了这个存档：{0}', L(e && e.message ? e.message : String(e))) };
+  }
+  editorCall('SDV.host.importSave(' + JSON.stringify(msg) + ')');
+  if (editor) editor.win.makeKeyAndOrderFront(NIL);
+}
+function chooseSaveFile() {
+  var panel = $.NSOpenPanel.openPanel;
+  panel.canChooseFiles = true;
+  panel.canChooseDirectories = false;
+  panel.allowsMultipleSelection = false;
+  panel.message = $(L('选择星露谷的存档文件（存档文件夹里和文件夹同名、没有后缀的那个）'));
+  var dir = savesDir();
+  if (exists(dir)) panel.directoryURL = $.NSURL.fileURLWithPath($(dir));
+  if (Number(panel.runModal) !== 1) return null;
+  return ObjC.unwrap(panel.URL.path);
+}
+
 function cityDone() {
-  infoAlert('天气已切换到「' + S.location.name + '」', '日出日落马上按新城市计算，实时天气几秒后更新。\n菜单 天气 › 所在城市 里可以看到当前城市。');
+  infoAlert(L('天气已切换到「{0}」', S.location.name), '日出日落马上按新城市计算，实时天气几秒后更新。\n菜单 天气 › 所在城市 里可以看到当前城市。');
 }
 
 // ---------- first-run setup ----------
@@ -876,7 +1194,7 @@ function openSetup(mode) {
   if (setup) closeSetup();             // start afresh (it may have been closed half way)
   var rect = $.NSMakeRect(0, 0, 560, 470);
   var win = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(rect, 1 | 2, 2, false);
-  win.title = $('欢迎使用 ' + APP_NAME);
+  win.title = $(L('欢迎使用 {0}', APP_NAME));
   win.releasedWhenClosed = false;
   var web = makeWebView(560, 470, 'setup', 'setup.html');
   win.contentView = web.wv;
@@ -895,12 +1213,12 @@ function closeSetup() {
 function setupCall(js) { if (setup) setup.wv.evaluateJavaScriptCompletionHandler($(js), noop); }
 function sendSetupStart() {
   var c = findContent();
-  if (!c) { setupCall('SDV_SETUP.start(' + JSON.stringify({ content: null, tried: setup.tried }) + ')'); return; }
+  if (!c) { setupCall('SDV_SETUP.start(' + JSON.stringify({ content: null, tried: setup.tried, lang: curLang() }) + ')'); return; }
   S.contentDir = c;
   var files = ObjC.deepUnwrap(fm.subpathsOfDirectoryAtPathError($(c), null)) || [];
   files = files.filter(function (f) { return /\.xnb$/i.test(f); });
   log('游戏素材：' + c + '（' + files.length + ' 个文件）');
-  setupCall('SDV_SETUP.start(' + JSON.stringify({ content: c, files: files, music: S.music }) + ')');
+  setupCall('SDV_SETUP.start(' + JSON.stringify({ content: c, files: files, music: S.music, lang: curLang() }) + ')');
 }
 function onSetupMessage(m) {
   if (m.type === 'hello') sendSetupStart();
@@ -910,7 +1228,7 @@ function onSetupMessage(m) {
     panel.canChooseDirectories = true;
     panel.allowsMultipleSelection = false;
     panel.treatsFilePackagesAsDirectories = false;
-    panel.message = $('选择 Stardew Valley（游戏本身，或它所在的文件夹）');
+    panel.message = $(L('选择 Stardew Valley（游戏本身，或它所在的文件夹）'));
     if (panel.runModal === 1) {
       var picked = panel.URL.path.js, c = resolveContent(picked);
       setup.tried = true;
@@ -940,18 +1258,45 @@ function reloadScenes() {
 }
 
 // ---------- background music ----------
-// The game's own seasonal tracks (cue → wave number in the game's wave bank, from its
-// Sound Bank). The first time a season is wanted, musicx.js turns its three tracks into
-// small AAC files in the background; then AVAudioPlayer plays them, a track at a time
-// with a quiet minute or so in between, like the game.
-var MUSIC = {
+// The game's own tracks (scene/music.js lists them: cue → wave number in the game's wave
+// bank). By default the three of the current season play, like the game; or the user's
+// own playlist from the settings window. A track is turned into a small AAC file by
+// musicx.js in the background the first time it's wanted; then AVAudioPlayer plays it,
+// with a quiet minute or so between tracks (a few seconds in a playlist).
+var MUSIC_FALLBACK = {
   spring: [['spring1', 93], ['spring2', 91], ['spring3', 92]],
   summer: [['summer1', 122], ['summer2', 123], ['summer3', 115]],
   fall: [['fall1', 121], ['fall2', 119], ['fall3', 120]],
   winter: [['winter1', 126], ['winter2', 124], ['winter3', 125]],
 };
+var musicLibCache = null;
+function musicLib() {
+  if (musicLibCache) return musicLibCache;
+  try {
+    var t = readText(codeDir + '/music.js');
+    if (t) musicLibCache = eval('(function () {' + t + '\n;return SDV_MUSIC; })()');
+  } catch (e) { log('读不了曲目表：' + e); }
+  return musicLibCache;
+}
+function normalizePick(v) {
+  var o = v && typeof v === 'object' ? v : {};
+  return { mode: o.mode === 'list' ? 'list' : 'season', list: Array.isArray(o.list) ? o.list.filter(function (x) { return typeof x === 'string'; }).slice(0, 80) : [],
+    order: o.order === 'order' ? 'order' : 'shuffle' };
+}
+function trackName(id) { var ML = musicLib(), t = ML && ML.byId[id]; return t ? (curLang() === 'en' ? t.en : t.zh) : id; }
+// The tracks to choose from now: [[id, wave]]
+function musicPool() {
+  var ML = musicLib(), P = S.musicPick;
+  if (ML && P.mode === 'list') {
+    var list = P.list.map(function (id) { return ML.byId[id]; }).filter(Boolean).map(function (t) { return [t.id, t.wave]; });
+    if (list.length) return { key: 'list', tracks: list };
+  }
+  var season = currentSeason();
+  var ids = ML ? ML.seasons[season].map(function (id) { return [id, ML.byId[id].wave]; }) : MUSIC_FALLBACK[season];
+  return { key: season, tracks: ids };
+}
 var MUSIC_DIR = SUPPORT + '/music';
-var music = { player: null, season: null, last: null, gapUntil: 0, stopAt: 0, task: null, preparing: null, failed: {} };
+var music = { player: null, key: null, last: null, gapUntil: 0, stopAt: 0, task: null, preparing: null, failed: {}, request: null, status: '' };
 function musicFile(name) { return MUSIC_DIR + '/' + name + '.m4a'; }
 function musicWanted() {
   if (locked || screensAsleep) return false;
@@ -959,19 +1304,19 @@ function musicWanted() {
   if (S.music === 'saver') return Boolean(saver);
   return false;
 }
-function prepareMusic(season) {
+function prepareTracks(tracks, label) {
   var xwb = S.contentDir ? S.contentDir + '/XACT/Wave Bank.xwb' : null;
-  if (!xwb || !exists(xwb) || !musicScript) { music.failed[season] = '找不到游戏的音乐文件'; return; }
+  if (!xwb || !exists(xwb) || !musicScript) { tracks.forEach(function (t) { music.failed[t[0]] = '找不到游戏的音乐文件'; }); return; }
   mkdirs(MUSIC_DIR);
   var args = ['-c', '/usr/bin/osascript -l JavaScript "$0" "$@" >> "$HOME/Library/Logs/StardewDesk.log" 2>&1', musicScript, xwb, MUSIC_DIR];
-  MUSIC[season].forEach(function (t) { args.push(t[0] + ':' + t[1]); });
+  tracks.forEach(function (t) { args.push(t[0] + ':' + t[1]); });
   var task = $.NSTask.alloc.init;
   task.launchPath = '/bin/sh';
   task.arguments = $(args);
   task.launch;
   music.task = task;
-  music.preparing = season;
-  log('准备' + season + '的配乐');
+  music.preparing = { label: label, ids: tracks.map(function (t) { return t[0]; }) };
+  log('准备配乐：' + label);
 }
 function musicStop(fade) {
   var p = music.player;
@@ -979,43 +1324,98 @@ function musicStop(fade) {
   if (fade) { p.setVolumeFadeDuration(0, 1.5); music.stopAt = Date.now() + 1600; }
   else { p.stop; music.player = null; music.stopAt = 0; }
 }
+// What plays next: a track asked for in the settings window, else the next in the pool.
+function nextTrack(pool) {
+  var all = pool.tracks;
+  if (music.request) {
+    var ML = musicLib(), t = ML && ML.byId[music.request];
+    if (t) return [t.id, t.wave];
+    music.request = null;
+  }
+  if (!all.length) return null;
+  if (S.musicPick.order === 'order' && pool.key === 'list') {
+    var i = all.findIndex(function (t) { return t[0] === music.last; });
+    return all[(i + 1) % all.length];
+  }
+  var choices = all.filter(function (t) { return t[0] !== music.last && !music.failed[t[0]]; });
+  if (!choices.length) choices = all.filter(function (t) { return !music.failed[t[0]]; });
+  return choices.length ? choices[Math.floor(Math.random() * choices.length)] : null;
+}
 function musicTick() {
   if (music.task && !music.task.isRunning) {
-    if (music.task.terminationStatus !== 0) music.failed[music.preparing] = '配乐准备失败，详情见日志';
+    if (music.task.terminationStatus !== 0 && music.preparing) music.preparing.ids.forEach(function (id) { if (!exists(musicFile(id))) music.failed[id] = '配乐准备失败，详情见日志'; });
     music.task = null; music.preparing = null;
   }
   if (music.stopAt && Date.now() >= music.stopAt) musicStop(false);
-  var want = musicWanted();
-  if (!want) { if (music.player && !music.stopAt) musicStop(true); return; }
-  var season = currentSeason();
-  var ready = MUSIC[season].filter(function (t) { return exists(musicFile(t[0])); });
-  if (ready.length < 3 && !music.task && !music.failed[season]) prepareMusic(season);
+  var want = musicWanted() || Boolean(music.request) || Boolean(music.preview && music.player && !music.stopAt);
+  if (!want) { if (music.player && !music.stopAt) musicStop(true); pushMusicState(); return; }
+  var pool = musicPool();
   if (music.player) {
     if (music.stopAt) return;
-    if (music.season !== season) { musicStop(true); return; }      // a new season: fade out, its music comes next
+    if (music.request || music.key !== pool.key) { musicStop(true); return; }   // asked for another / a new season: fade out
     music.player.volume = MUSIC_VOL[S.musicVolume];
-    if (!music.player.isPlaying) { music.player = null; music.gapUntil = Date.now() + (20 + Math.random() * 40) * 1000; }
+    if (!music.player.isPlaying) {
+      music.player = null; music.preview = false;
+      music.gapUntil = Date.now() + (pool.key === 'list' ? 3 + Math.random() * 5 : 20 + Math.random() * 40) * 1000;
+      pushMusicState();
+    }
     return;
   }
-  if (Date.now() < music.gapUntil || !ready.length) return;
-  var choices = ready.filter(function (t) { return t[0] !== music.last; });
-  var pick = (choices.length ? choices : ready)[Math.floor(Math.random() * (choices.length || ready.length))];
+  if (Date.now() < music.gapUntil && !music.request) { pushMusicState(); return; }
+  var pick = nextTrack(pool);
+  if (!pick) { pushMusicState(); return; }
+  if (!exists(musicFile(pick[0]))) {
+    if (!music.task && !music.failed[pick[0]]) prepareTracks([pick], trackName(pick[0]));
+    if (music.failed[pick[0]]) { if (music.request === pick[0]) music.request = null; music.last = pick[0]; }
+    pushMusicState();
+    return;
+  }
   var p = $.AVAudioPlayer.alloc.initWithContentsOfURLError($.NSURL.fileURLWithPath($(musicFile(pick[0]))), null);
-  if (!p || p.isNil()) { log('播放失败：' + pick[0]); music.gapUntil = Date.now() + 60000; return; }
+  music.request = null;
+  if (!p || p.isNil()) { log('播放失败：' + pick[0]); music.failed[pick[0]] = '播放失败'; music.gapUntil = Date.now() + 5000; return; }
   p.volume = 0;
   p.prepareToPlay;
   p.play;
   p.setVolumeFadeDuration(MUSIC_VOL[S.musicVolume], 3);
-  music.player = p; music.season = season; music.last = pick[0];
+  music.player = p; music.key = pool.key; music.last = pick[0];
   log('播放 ' + pick[0]);
+  pushMusicState();
 }
 function musicStatus() {
-  var season = currentSeason(), zh = { spring: '春', summer: '夏', fall: '秋', winter: '冬' }[season];
-  if (S.music === 'off') return null;
-  if (music.preparing) return '正在从游戏里取出' + zh + '天的配乐…';
-  if (music.failed[season]) return music.failed[season];
-  if (music.player && !music.stopAt) return '正在播放：' + zh + ' · 第 ' + music.last.slice(-1) + ' 首';
-  return S.music === 'saver' ? '屏保时播放' + zh + '天的配乐' : '配乐间歇中';
+  var zh = L({ spring: '春', summer: '夏', fall: '秋', winter: '冬' }[currentSeason()]);
+  if (S.music === 'off' && !music.player) return null;
+  if (music.preparing) return L('正在从游戏里取出「{0}」…', trackName(music.preparing.ids[0]));
+  if (music.player && !music.stopAt) return L('正在播放：{0}', trackName(music.last));
+  var pool = musicPool(), bad = pool.tracks.filter(function (t) { return music.failed[t[0]]; });
+  if (bad.length && bad.length === pool.tracks.length) return L(music.failed[bad[0][0]]);
+  if (S.music === 'saver') return pool.key === 'list' ? L('屏保时播放我的歌单') : L('屏保时播放{0}天的配乐', zh);
+  return L('配乐间歇中');
+}
+// The settings window's 音乐 page: what's set and what's playing.
+function musicState() {
+  return { music: S.music, volume: S.musicVolume, pick: S.musicPick, now: music.player && !music.stopAt ? music.last : null,
+    preparing: music.preparing ? music.preparing.ids : [], status: musicStatus() || '', season: currentSeason() };
+}
+function pushMusicState() {
+  var st = JSON.stringify(musicState());
+  if (st === music.status) return;
+  music.status = st;
+  editorCall('SDV.host.apply("musicState",' + st + ')');
+}
+function musicPlay(id) {
+  var ML = musicLib();
+  if (!ML || !ML.byId[id]) return;
+  music.request = id; music.gapUntil = 0;
+  music.preview = !musicWanted();                 // 试听 while the music is off: just this track
+  if (music.failed[id]) delete music.failed[id];
+  musicTick();
+}
+function musicNext() {
+  var pool = musicPool(), n = null;
+  music.request = null;
+  if (music.player) { music.gapUntil = 0; n = nextTrack(pool); }
+  else n = nextTrack(pool);
+  if (n) musicPlay(n[0]);
 }
 
 // ---------- policy: when to render, how fast ----------
@@ -1038,8 +1438,19 @@ function fpsFor(i) {
   if (c > 0.6) return Math.min(8, q);
   return q;
 }
+// Why fpsFor(i) returned what it did, for the log — fpsFor alone can't tell a saver
+// pause from a window-coverage pause from a low-power pause, and they all look the
+// same on screen (the farm freezes), so this is what makes a repeat flicker diagnosable.
+function fpsReason(i) {
+  var r = stopReason();
+  if (r) return r;
+  var c = coverage[i] || 0;
+  if (c > 0.97) return '窗口遮挡 ' + Math.round(c * 100) + '%，已停止渲染';
+  if (c > 0.6) return '窗口遮挡 ' + Math.round(c * 100) + '%，降帧';
+  return null;
+}
 function applyPolicy() {
-  scenes.forEach(function (s, i) { setFps(s, fpsFor(i)); });
+  scenes.forEach(function (s, i) { setFps(s, fpsFor(i), fpsReason(i)); });
   restartCursorTimer();
 }
 
@@ -1183,6 +1594,7 @@ function projectDir() {
 function updateFromProject() {
   var dir = projectDir();
   if (!dir) return;
+  flushSettings();
   var q = function (s) { return "'" + s.replace(/'/g, "'\\''") + "'"; };
   var logFile = $.NSHomeDirectory().js + '/Library/Logs/StardewDesk-install.log';
   var t = $.NSTask.alloc.init;
@@ -1250,6 +1662,11 @@ function stopSaver() {
 function finishSaver() {
   var s = saver;
   saver = null;
+  // idleSeconds() can report a stray high reading moments after real input resets it
+  // (seen on real hardware as the saver closing and reopening two or three times in
+  // under 15s). A closed saver gets a short grace period before the idle check is
+  // trusted again, so one bad reading can't immediately reopen it.
+  saverBlockedUntil = Math.max(saverBlockedUntil, Date.now() + 10000);
   s.views.forEach(function (v) {
     try { v.ucc.removeScriptMessageHandlerForName('sdv'); } catch (e) { /* ignore */ }
     v.win.orderOut(NIL);
@@ -1268,9 +1685,12 @@ function saverTick() {
   if (saver) {
     var idle = idleSeconds();
     var age = (Date.now() - saver.started) / 1000;
-    if (!saver.closing && age > 1.5 && idle < saver.lastIdle - 0.2) stopSaver();
+    if (!saver.closing && age > 1.5 && idle < saver.lastIdle - 0.2) {
+      log('屏保：检测到输入（闲置 ' + saver.lastIdle.toFixed(1) + 's → ' + idle.toFixed(1) + 's），关闭');
+      stopSaver();
+    }
     saver.lastIdle = idle;
-    if (locked || screensAsleep) stopSaver();
+    if (locked || screensAsleep || !S.saverMinutes) stopSaver();   // the setting can turn off mid-show
     var step = saver.closing ? -0.2 : 0.05;
     saver.alpha = Math.max(0, Math.min(1, saver.alpha + step));
     saver.views.forEach(function (v) { v.win.alphaValue = saver.alpha; });
@@ -1280,10 +1700,12 @@ function saverTick() {
   saverClock++;
   if (saverClock % 20) return;          // the rest runs once a second
   var minutes = S.saverMinutes;
-  if (!minutes || locked || screensAsleep || S.paused) return;
-  if (idleSeconds() < minutes * 60) return;
+  if (!(minutes > 0) || locked || screensAsleep || S.paused) return;
+  var idle = idleSeconds();
+  if (idle < minutes * 60) return;
   if (Date.now() < saverBlockedUntil) return;
   if (displayHeldAwake()) { saverBlockedUntil = Date.now() + 60000; return; }
+  log('屏保：自动触发（设置 ' + minutes + ' 分钟，闲置 ' + idle.toFixed(1) + 's）');
   startSaver(false);
 }
 
@@ -1301,7 +1723,7 @@ function setLogin(on) {
 
 // ---------- menu ----------
 function addItem(menu, title, action, value, state) {
-  var item = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent($(title), action || 'noop:', $(''));
+  var item = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent($(L(title)), action || 'noop:', $(''));
   item.target = target;
   if (value != null) item.representedObject = $(value);
   if (state) item.state = 1;
@@ -1310,9 +1732,9 @@ function addItem(menu, title, action, value, state) {
   return item;
 }
 function addSubmenu(menu, title, prefix, options, selected) {
-  var item = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent($(title), 'noop:', $(''));
+  var item = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent($(L(title)), 'noop:', $(''));
   item.target = target;
-  var sub = $.NSMenu.alloc.initWithTitle($(title));
+  var sub = $.NSMenu.alloc.initWithTitle($(L(title)));
   sub.autoenablesItems = false;
   options.forEach(function (o) { addItem(sub, o[1], 'menuAction:', prefix + ':' + o[0], o[0] === selected); });
   item.submenu = sub;
@@ -1326,7 +1748,7 @@ function rebuildMenu(menu) {
   var ws = addSubmenu(menu, '天气', 'weather', [['live', '实时天气'], ['sunny', '晴'], ['cloudy', '阴'], ['rain', '雨'], ['storm', '雷雨'],
     ['snow', '雪'], ['fog', '雾'], ['windy', '大风']], S.weather);
   ws.addItem($.NSMenuItem.separatorItem);
-  addItem(ws, '所在城市：' + locationLabel());
+  addItem(ws, L('所在城市：{0}', locationLabel()));
   addItem(ws, '更换城市…', 'menuAction:', 'city:set');
   if (S.location) addItem(ws, '改回跟随时区自动', 'menuAction:', 'city:auto');
   addSubmenu(menu, '宠物', 'pet', PETS, S.pet);
@@ -1338,6 +1760,12 @@ function rebuildMenu(menu) {
   var mu = addSubmenu(menu, '背景音乐', 'music', [['off', '关闭'], ['always', '一直播放'], ['saver', '只在屏保时播放']], S.music);
   if (S.music !== 'off') {
     mu.addItem($.NSMenuItem.separatorItem);
+    var pk = S.musicPick;
+    addItem(mu, '跟随季节（游戏里这个季节的三首）', 'menuAction:', 'musicMode:season', pk.mode !== 'list');
+    addItem(mu, pk.list.length ? L('我的歌单（{0} 首）', pk.list.length) : '我的歌单（还没选歌）', 'menuAction:', 'musicMode:list', pk.mode === 'list');
+    addItem(mu, '选歌…', 'menuAction:', 'musicPick');
+    addItem(mu, '下一首', 'menuAction:', 'musicNext');
+    mu.addItem($.NSMenuItem.separatorItem);
     [['low', '音量：小'], ['mid', '音量：中'], ['high', '音量：大']].forEach(function (o) { addItem(mu, o[1], 'menuAction:', 'musicVol:' + o[0], o[0] === S.musicVolume); });
     var ms = musicStatus();
     if (ms) { mu.addItem($.NSMenuItem.separatorItem); addItem(mu, ms); }
@@ -1346,36 +1774,38 @@ function rebuildMenu(menu) {
   var fo = S.focus;
   if (fo && !fo.done) {
     var left = Math.max(1, Math.ceil((fo.start + fo.dur - Date.now() / 1000) / 60));
-    var fs = $.NSMenu.alloc.initWithTitle($('专注'));
+    var fs = $.NSMenu.alloc.initWithTitle($(L('专注')));
     fs.autoenablesItems = false;
-    addItem(fs, fo.cropZh + '正在长，还剩 ' + left + ' 分钟');
+    addItem(fs, L('{0}正在长，还剩 {1} 分钟', L(fo.cropZh), left));
     addItem(fs, '放弃这次专注', 'menuAction:', 'focusStop');
-    var fi = addItem(menu, '专注中 · 还剩 ' + left + ' 分钟', 'noop:');
+    var fi = addItem(menu, L('专注中 · 还剩 {0} 分钟', left), 'noop:');
     fi.enabled = true; fi.submenu = fs;
   } else {
     var fm2 = addSubmenu(menu, '开始专注种田', 'focus', [['25', '25 分钟'], ['50', '50 分钟']], '');
-    if (shippedToday()) { fm2.addItem($.NSMenuItem.separatorItem); addItem(fm2, '今天出货：' + focusSummary()); }
+    if (shippedToday()) { fm2.addItem($.NSMenuItem.separatorItem); addItem(fm2, L('今天出货：{0}', focusSummary())); }
   }
   boardMenu(menu);
-  if (S.mailWatch && mail.fresh.length) addItem(menu, '信箱里有 ' + mail.fresh.length + ' 个新文件 · 标记为已读', 'menuAction:', 'mailRead');
-  if (timeOverride != null) addItem(menu, '恢复实时时间（现在是模拟的 ' + Math.floor(timeOverride) + ':' + ('0' + Math.round((timeOverride % 1) * 60)).slice(-2) + '）', 'menuAction:', 'realtime');
+  if (S.mailWatch && mail.fresh.length) addItem(menu, L('信箱里有 {0} 个新文件 · 标记为已读', mail.fresh.length), 'menuAction:', 'mailRead');
+  if (timeOverride != null) addItem(menu, L('恢复实时时间（现在是模拟的 {0}）', Math.floor(timeOverride) + ':' + ('0' + Math.round((timeOverride % 1) * 60)).slice(-2)), 'menuAction:', 'realtime');
 
   menu.addItem($.NSMenuItem.separatorItem);
   addItem(menu, S.paused ? '继续' : '暂停', 'menuAction:', 'pause');
   addItem(menu, '打开设置窗口…', 'menuAction:', 'editor');
-  var more = addSubmenu(menu, '更多', 'quality', Object.keys(QUALITY).map(function (k) { return [k, '画质：' + QUALITY[k].title]; }), S.quality);
+  var more = addSubmenu(menu, '更多', 'quality', Object.keys(QUALITY).map(function (k) { return [k, L('画质：{0}', L(QUALITY[k].title))]; }), S.quality);
   more.addItem($.NSMenuItem.separatorItem);
   addItem(more, '新文件提醒（信箱）', 'menuAction:', 'mailWatch', S.mailWatch);
   if (S.mailWatch && (mail.blocked.desktop || mail.blocked.downloads)) {
-    addItem(more, '信箱看不到' + (mail.blocked.desktop ? '桌面' : '') + (mail.blocked.desktop && mail.blocked.downloads ? '和' : '') + (mail.blocked.downloads ? '下载' : '') + '：去系统设置 › 隐私与安全性 › 文件与文件夹里允许');
+    addItem(more, L('信箱看不到{0}：去系统设置 › 隐私与安全性 › 文件与文件夹里允许', [mail.blocked.desktop ? L('桌面') : '', mail.blocked.downloads ? L('下载') : ''].filter(Boolean).join(L('和'))));
   }
+  addItem(more, '镜头跟随鼠标（鼠标移到屏幕边缘时移动）', 'menuAction:', 'follow', S.follow);
   addItem(more, '登录时启动', 'menuAction:', 'login', loginEnabled());
+  addSubmenu(more, '语言 / Language', 'lang', [['auto', '跟随系统 / System'], ['zh', '中文'], ['en', 'English']], S.lang);
   more.addItem($.NSMenuItem.separatorItem);
   addItem(more, '重新加载场景', 'menuAction:', 'reload');
   addItem(more, '重新读取游戏画面…', 'menuAction:', 'resetup');
   if (projectDir()) addItem(more, '更新到最新版本（重新安装）', 'menuAction:', 'update');
   menu.addItem($.NSMenuItem.separatorItem);
-  addItem(menu, '退出 ' + APP_NAME, 'menuAction:', 'quit');
+  addItem(menu, L('退出 {0}', APP_NAME), 'menuAction:', 'quit');
 }
 function menuAction(sender) {
   var v = sender.representedObject.js;
@@ -1385,10 +1815,11 @@ function menuAction(sender) {
     editorCall('SDV.host.apply(' + JSON.stringify(kind) + ',' + JSON.stringify(val) + ')');
   }
   else if (kind === 'editor') { openEditor(); }
-  else if (kind === 'city') { if (val === 'auto') setLocation(null); else cityDialog(); }
+  else if (kind === 'lang') { setLang(val); }
+  else if (kind === 'city') { if (val === 'auto') setLocation(null); else deferModal(cityDialog); }
   else if (kind === 'realtime') { applySetting('time', null); editorCall('SDV.host.apply("time",null)'); }
   else if (kind === 'quality') { S.quality = val; applyPolicy(); }
-  else if (kind === 'saver') { S.saverMinutes = Number(val); }
+  else if (kind === 'saver') { S.saverMinutes = Number(val); if (saver) stopSaver(); }
   else if (kind === 'saverNow') { startSaver(true); }
   else if (kind === 'focus') { startFocus(Number(val) || 25); }
   else if (kind === 'focusStop') { giveUpFocus(); }
@@ -1398,11 +1829,19 @@ function menuAction(sender) {
   else if (kind === 'pause') { S.paused = !S.paused; applyPolicy(); }
   else if (kind === 'update') { updateFromProject(); }
   else if (kind === 'reload') { reloadScenes(); }
-  else if (kind === 'music') { S.music = val; music.gapUntil = 0; music.failed = {}; musicTick(); }
-  else if (kind === 'musicVol') { S.musicVolume = val; if (music.player) music.player.volume = MUSIC_VOL[val]; }
+  else if (kind === 'music') { S.music = val; music.gapUntil = 0; music.failed = {}; musicTick(); pushMusicState(); }
+  else if (kind === 'musicVol') { S.musicVolume = val; if (music.player) music.player.volume = MUSIC_VOL[val]; pushMusicState(); }
+  else if (kind === 'musicMode') {
+    var mp = S.musicPick;
+    if (val === 'list' && !mp.list.length) { var rdy = editor && editor.ready; openEditor(); if (rdy) editorCall('SDV.host.openTab("music")'); else musicPanelWanted = true; return; }
+    mp.mode = val; S.musicPick = mp; music.gapUntil = 0; musicTick(); pushMusicState();
+  }
+  else if (kind === 'musicNext') { musicNext(); }
+  else if (kind === 'musicPick') { var r2 = editor && editor.ready; openEditor(); if (r2) editorCall('SDV.host.openTab("music")'); else musicPanelWanted = true; }
   else if (kind === 'resetup') { openSetup('full'); }
+  else if (kind === 'follow') { applySetting('follow', !S.follow); editorCall('SDV.host.apply("follow",' + JSON.stringify(S.follow) + ')'); }
   else if (kind === 'login') { setLogin(!loginEnabled()); }
-  else if (kind === 'quit') { $.NSApplication.sharedApplication.terminate(NIL); }
+  else if (kind === 'quit') { flushSettings(); $.NSApplication.sharedApplication.terminate(NIL); }
 }
 
 // ---------- ObjC glue ----------
@@ -1413,6 +1852,8 @@ ObjC.registerSubclass({
   superclass: 'NSObject',
   methods: {
     'noop:': { types: ['void', ['id']], implementation: function () {} },
+    'later:': { types: ['void', ['id']], implementation: guard('later', function () { runLater(); }) },
+    'todoTimeChanged:': { types: ['void', ['id']], implementation: function () { if (todoCheck) todoCheck.state = 1; } },
     'musicTick:': { types: ['void', ['id']], implementation: guard('music', function () { musicTick(); sfxTick(); }) },
     'focusTick:': { types: ['void', ['id']], implementation: guard('focus', function () { focusTick(); boardTick(); }) },
     'mailTick:': { types: ['void', ['id']], implementation: guard('mail', function () { mailTick(); }) },
@@ -1420,10 +1861,11 @@ ObjC.registerSubclass({
     'coverageTick:': { types: ['void', ['id']], implementation: guard('coverage', function () { updateCoverage(); }) },
     'weatherTick:': { types: ['void', ['id']], implementation: guard('weather', function () { weatherTick(); }) },
     'saverTick:': { types: ['void', ['id']], implementation: guard('saver', function () { saverTick(); }) },
+    'runDeferred:': { types: ['void', ['id']], implementation: guard('deferred', function () { var fn = pendingModal; pendingModal = null; if (fn) fn(); }) },
     'menuAction:': { types: ['void', ['id']], implementation: guard('menu', function (sender) { menuAction(sender); }) },
     'menuNeedsUpdate:': { types: ['void', ['id']], implementation: guard('menuUpdate', function (menu) { rebuildMenu(menu); }) },
     'screensChanged:': { types: ['void', ['id']], implementation: guard('screens', function () { log('收到显示器参数变更通知'); buildScenes(); }) },
-    'powerChanged:': { types: ['void', ['id']], implementation: guard('power', function () { applyPolicy(); }) },
+    'powerChanged:': { types: ['void', ['id']], implementation: guard('power', function () { log('电源状态变化：低电量模式 ' + (lowPower() ? '开' : '关')); applyPolicy(); }) },
     'slept:': { types: ['void', ['id']], implementation: guard('sleep', function () { screensAsleep = true; applyPolicy(); }) },
     'woke:': { types: ['void', ['id']], implementation: guard('wake', function () { screensAsleep = false; applyPolicy(); }) },
     'locked:': { types: ['void', ['id']], implementation: guard('lock', function () { locked = true; applyPolicy(); }) },
@@ -1433,14 +1875,15 @@ ObjC.registerSubclass({
 var clickViewClass = null;    // the view inside the click catcher
 (function () {
   var down = { types: ['void', ['id']], implementation: guard('click', function (ev) { catcherClick(ev); }) };
+  var wheel = { types: ['void', ['id']], implementation: guard('scroll', function (ev) { catcherScroll(ev); }) };
   try {
     // take the very first click, even though this app is never the active one
     ObjC.registerSubclass({ name: 'SDVClickView', superclass: 'NSView', methods: {
-      'mouseDown:': down, 'acceptsFirstMouse:': { types: ['bool', ['id']], implementation: function () { return true; } } } });
+      'mouseDown:': down, 'scrollWheel:': wheel, 'acceptsFirstMouse:': { types: ['bool', ['id']], implementation: function () { return true; } } } });
     clickViewClass = 'SDVClickView';
   } catch (e) {
     log('点击视图（带 acceptsFirstMouse）注册失败：' + e);
-    try { ObjC.registerSubclass({ name: 'SDVClickViewPlain', superclass: 'NSView', methods: { 'mouseDown:': down } }); clickViewClass = 'SDVClickViewPlain'; } catch (e2) { log('点击视图注册失败：' + e2); }
+    try { ObjC.registerSubclass({ name: 'SDVClickViewPlain', superclass: 'NSView', methods: { 'mouseDown:': down, 'scrollWheel:': wheel } }); clickViewClass = 'SDVClickViewPlain'; } catch (e2) { log('点击视图注册失败：' + e2); }
   }
 })();
 ObjC.registerSubclass({

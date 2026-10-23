@@ -18,7 +18,7 @@ const CITIES = require('./cities');
 const wavebank = require('./wavebank');
 
 const APP_NAME = 'Stardew Desk';
-const DATA_VERSION = '7';                       // must match scene/setup.js
+const DATA_VERSION = '9';                       // must match scene/setup.js
 const WIN = process.platform === 'win32';
 
 app.setName(APP_NAME);
@@ -78,12 +78,47 @@ function saveSettings() {
     catch (e) { log('设置保存失败：' + e); }
   }, 200);
 }
+// Write now, not in 200 ms (before quitting, and right after a layout change).
+function flushSettings() {
+  clearTimeout(saveTimer);
+  try { fs.mkdirSync(SUPPORT, { recursive: true }); fs.writeFileSync(SETTINGS_PATH + '.tmp', JSON.stringify(store, null, 1)); fs.renameSync(SETTINGS_PATH + '.tmp', SETTINGS_PATH); }
+  catch (e) { log('设置保存失败：' + e); }
+}
 const get = (k, d) => (k in store ? store[k] : d);
 const set = (k, v) => { store[k] = v; saveSettings(); };
 
 const PETS = [['cat0', '橘猫'], ['cat1', '灰猫'], ['cat2', '黄猫'], ['cat3', '白猫'], ['cat4', '黑猫'], ['cat5', '紫猫'],
   ['dog0', '黄狗'], ['dog1', '牧羊犬'], ['dog2', '金毛'], ['dog3', '黑白花狗'], ['dog4', '棕狗'], ['dog5', '紫狗'], ['none', '不养']];
 const MUSIC_VOL = { low: 0.12, mid: 0.25, high: 0.45 };
+// ---------- 语言 / Language ----------
+// scene/i18n.js + i18n-en.js, shared with the pages. S.lang: 'auto' (Windows' language), 'zh', 'en'.
+let i18nCache = null;
+function i18n() {
+  if (i18nCache) return i18nCache;
+  try {
+    const src = fs.readFileSync(path.join(codeDir, 'i18n.js'), 'utf8') + '\n' + (fs.existsSync(path.join(codeDir, 'i18n-en.js')) ? fs.readFileSync(path.join(codeDir, 'i18n-en.js'), 'utf8') : '');
+    i18nCache = new Function(src + '\n;return SDV_I18N;')();
+    i18nCache.set(curLang());
+  } catch (e) { log('读不了语言文件：' + e); }
+  return i18nCache;
+}
+function curLang() { const p = S.lang; return p === 'zh' || p === 'en' ? p : (/^zh/i.test(app.getLocale() || '') ? 'zh' : 'en'); }
+function L(k, ...a) {
+  const x = i18n();
+  if (x) return x.L(k, ...a);
+  return String(k).replace(/\{(\d+)\}/g, (m, i) => (a[Number(i)] == null ? '' : String(a[Number(i)])));
+}
+function setLang(pref) {
+  S.lang = pref === 'zh' || pref === 'en' ? pref : 'auto';
+  if (i18n()) i18nCache.set(curLang());
+  const js = 'SDV.host.apply("lang",' + JSON.stringify(curLang()) + ')';
+  scenes.forEach(sc => call(sc, js)); editorCall(js);
+  if (saver) saver.views.forEach(v => { if (v.ready) run(v.wc, js); });
+  if (editor && editor.win && !editor.win.isDestroyed()) editor.win.setTitle(L('{0} 设置', APP_NAME));
+  music.status = ''; pushMusicState();
+}
+// every label of a menu template, in the current language
+function translateMenu(list) { list.forEach(o => { if (o.label) o.label = L(o.label); if (Array.isArray(o.submenu)) translateMenu(o.submenu); }); return list; }
 const QUALITY = { eco: { fps: 10, title: '省电（10 fps）' }, balanced: { fps: 15, title: '平衡（15 fps）' }, smooth: { fps: 30, title: '流畅（30 fps）' } };
 const S = {
   get paused() { return get('paused', false); }, set paused(v) { set('paused', v); },
@@ -97,9 +132,16 @@ const S = {
   get location() { return get('location', null); }, set location(v) { set('location', v || null); },
   get contentDir() { return get('contentDir', null); }, set contentDir(v) { set('contentDir', v || null); },
   get music() { const m = get('music', 'off'); return m === 'always' || m === 'saver' ? m : 'off'; }, set music(v) { set('music', v); },
+  get lang() { const v = get('lang', 'auto'); return v === 'zh' || v === 'en' ? v : 'auto'; }, set lang(v) { set('lang', v); },
   get musicVolume() { const v = get('musicVolume', 'mid'); return MUSIC_VOL[v] ? v : 'mid'; }, set musicVolume(v) { set('musicVolume', v); },
+  // which tracks: {mode: 'season' | 'list', list: [ids], order: 'shuffle' | 'order'}
+  get musicPick() { return normalizePick(get('musicPick', null)); }, set musicPick(v) { set('musicPick', normalizePick(v)); flushSettings(); },
   get pet() { return get('pet', 'cat0'); }, set pet(v) { set('pet', v); },
-  get layout() { return get('layout', {}) || {}; }, set layout(v) { set('layout', v || {}); },
+  // 镜头跟随鼠标: the desktop view leans toward the cursor
+  get follow() { return Boolean(get('follow', false)); }, set follow(v) { set('follow', Boolean(v)); },
+  get layout() { return get('layout', {}) || {}; }, set layout(v) { set('layout', v || {}); flushSettings(); },
+  // 我的布局: named copies of layouts and automatic backups (kept by the settings page)
+  get layouts() { const v = get('layouts', []); return Array.isArray(v) ? v : []; }, set layouts(v) { set('layouts', Array.isArray(v) ? v : []); flushSettings(); },
   get board() { return get('board', null); }, set board(v) { set('board', v || null); },
   get frame() { return get('frame', null); }, set frame(v) { set('frame', v); },
   get desktopMode() { const m = get('desktopMode', 'auto'); return ['auto', 'nolayer', 'window'].includes(m) ? m : 'auto'; },
@@ -226,11 +268,18 @@ function applySetting(key, value) {
   else if (key === 'pet') S.pet = value || 'cat0';
   else if (key === 'time') timeOverride = value == null ? null : value;
   else if (key === 'board') { boardTicked(S.board, value); S.board = value; }
+  else if (key === 'layouts') { S.layouts = value; return; }   // only the settings page shows them
+  else if (key === 'follow') S.follow = Boolean(value);
+  else if (key === 'music') { S.music = value === 'always' || value === 'saver' ? value : 'off'; music.gapUntil = 0; music.failed = {}; musicTick(); pushMusicState(); return; }
+  else if (key === 'musicVolume') { if (MUSIC_VOL[value]) { S.musicVolume = value; if (music.playing) audioSend('audio:volume', { volume: MUSIC_VOL[value], seconds: 0.4 }); } pushMusicState(); return; }
+  else if (key === 'lang') { setLang(value); return; }
+  else if (key === 'musicPick') { S.musicPick = value; music.gapUntil = 0; musicTick(); pushMusicState(); return; }
   else return;
   callAll('SDV.host.apply(' + JSON.stringify(key) + ',' + JSON.stringify(value == null ? null : value) + ')');
 }
 function settingsScript() {
   const js = [
+    'SDV.host.apply("lang",' + JSON.stringify(curLang()) + ')',
     'SDV.host.apply("season",' + JSON.stringify(S.season) + ')',
     'SDV.host.apply("weather",' + JSON.stringify(S.weather) + ')',
     'SDV.host.apply("time",' + JSON.stringify(timeOverride) + ')',
@@ -239,6 +288,9 @@ function settingsScript() {
   const al = autoLocation();
   if (al) js.push('SDV.host.apply("location",' + JSON.stringify(al) + ')');
   js.push('SDV.host.apply("layout",' + JSON.stringify(S.layout) + ')');
+  js.push('SDV.host.apply("layouts",' + JSON.stringify(S.layouts) + ')');
+  js.push('SDV.host.apply("follow",' + JSON.stringify(S.follow) + ')');
+  js.push('SDV.host.apply("musicState",' + JSON.stringify(musicState()) + ')');
   js.push('SDV.host.apply("pet",' + JSON.stringify(S.pet) + ')');
   js.push('SDV.host.apply("board",' + JSON.stringify(S.board) + ')');
   js.push('SDV.host.mail(' + Math.max(0, mail.lastCount) + ')');
@@ -250,6 +302,7 @@ function pushSettings(s) { call(s, settingsScript()); s.fps = -1; applyPolicy();
 
 function onMessage(wc, body) {
   if (setup && setup.wc === wc) { onSetupMessage(body); return; }
+  if (todoWin && todoWin.wc === wc) { onTodoMessage(body); return; }
   if (saver) {
     const v = saver.views.find(x => x.wc === wc);
     if (v) {
@@ -263,8 +316,14 @@ function onMessage(wc, body) {
       const d = editor.display, k = d.scaleFactor;
       editorCall('SDV.host.setTarget(' + Math.round(d.bounds.width * k) + ',' + Math.round(d.bounds.height * k) + ');' + settingsScript());
       if (boardPanelWanted) { boardPanelWanted = false; editorCall('SDV.host.openBoard()'); }
+      if (musicPanelWanted) { musicPanelWanted = false; editorCall('SDV.host.openTab("music")'); }
+      music.status = '';
     } else if (body.type === 'setting') applySetting(body.key, body.value);
     else if (body.type === 'mailRead') markMailRead();
+    else if (body.type === 'importSave') importSaveDialog();
+    else if (body.type === 'musicPlay') musicPlay(String(body.id || ''));
+    else if (body.type === 'musicNext') musicNext();
+    else if (body.type === 'musicStop') { music.request = null; music.preview = false; if (S.music !== 'off') music.gapUntil = Date.now() + 60000; musicStop(true); }
     return;
   }
   const s = scenes.find(x => x.wc === wc);
@@ -286,6 +345,7 @@ function onMessage(wc, body) {
   else if (body.type === 'mailRead') markMailRead();
   else if (body.type === 'boardRect') setCatcher(s, body.rect || null);
   else if (body.type === 'board') setBoard(body.value);
+  else if (body.type === 'boardAdd') { hideCatcher(); addTodoDialog(); }   // "＋ 添加待办" on the notice
 }
 
 // ---------- settings window ----------
@@ -295,7 +355,7 @@ function openEditor() {
     const wa = d.workArea, sw = d.bounds.width, sh = d.bounds.height;
     const cw = Math.round(Math.min(wa.width * 0.72, (wa.height - 60) * sw / sh));
     const ch = Math.round(cw * sh / sw);
-    const win = new BrowserWindow({ width: cw, height: ch, useContentSize: true, title: APP_NAME + ' 设置', show: false,
+    const win = new BrowserWindow({ width: cw, height: ch, useContentSize: true, title: L('{0} 设置', APP_NAME), show: false,
       backgroundColor: '#1c140f', autoHideMenuBar: true, icon: appIcon(), webPreferences: webPrefs('editor') });
     win.setMenu(null);
     win.setAspectRatio(sw / sh);
@@ -380,7 +440,7 @@ function currentSeason() {
   return ['winter', 'winter', 'spring', 'spring', 'spring', 'summer', 'summer', 'summer', 'fall', 'fall', 'fall', 'winter'][new Date().getMonth()];
 }
 function todayKey() { const d = new Date(); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
-function todayLog() { const L = S.focusLog; return L && L.day === todayKey() ? L : { day: todayKey(), n: 0, last: null, crops: {} }; }
+function todayLog() { const LG = S.focusLog; return LG && LG.day === todayKey() ? LG : { day: todayKey(), n: 0, last: null, crops: {} }; }
 function focusPayload() { const o = Object.assign({}, S.focus || {}); o.log = todayLog(); return o; }
 function pushFocus() { const js = 'SDV.host.focus(' + JSON.stringify(focusPayload()) + ')'; callAll(js); editorCall(js); }
 function startFocus(minutes) {
@@ -395,27 +455,27 @@ function focusTick() {
   const now = Date.now() / 1000;
   if (!f.done && now >= f.start + f.dur) {
     f.done = true; f.doneAt = now; S.focus = f;
-    const L = todayLog();
-    L.n += 1; L.last = f.crop; L.crops[f.crop] = (L.crops[f.crop] || 0) + 1;
-    S.focusLog = L;
-    notifyUser('专注完成', '收获了一个' + f.cropZh + ' · 今天第 ' + L.n + ' 次');
+    const LG = todayLog();
+    LG.n += 1; LG.last = f.crop; LG.crops[f.crop] = (LG.crops[f.crop] || 0) + 1;
+    S.focusLog = LG;
+    notifyUser('专注完成', L('收获了一个{0} · 今天第 {1} 次', L(f.cropZh), LG.n));
     pushFocus();
   } else if (f.done && now - f.doneAt > 600) { S.focus = null; pushFocus(); }
 }
 function notifyUser(title, text, silent) {
-  try { if (Notification.isSupported()) new Notification({ title, body: text, silent: Boolean(silent), icon: appIcon() }).show(); }
+  try { if (Notification.isSupported()) new Notification({ title: L(title), body: L(text), silent: Boolean(silent), icon: appIcon() }).show(); }
   catch (e) { log('通知失败：' + e); }
 }
 function focusSummary() {
-  const L = todayLog();
-  const parts = Object.keys(L.crops).map(k => L.crops[k] + ' 个' + (CROP_ZH[k] || k));
-  if (L.notes) parts.push(L.notes + ' 张做完的待办');
-  return parts.join('、');
+  const LG = todayLog();
+  const parts = Object.keys(LG.crops).map(k => L('{0} 个{1}', LG.crops[k], L(CROP_ZH[k] || k)));
+  if (LG.notes) parts.push(L('{0} 张做完的待办', LG.notes));
+  return parts.join(curLang() === 'en' ? ', ' : '、');
 }
-function shippedToday() { const L = todayLog(); return L.n + (L.notes || 0); }
+function shippedToday() { const LG = todayLog(); return LG.n + (LG.notes || 0); }
 
 // ---------- bulletin board: to-dos and the countdown to the end of the day ----------
-let boardPanelWanted = false;
+let boardPanelWanted = false, musicPanelWanted = false;
 function boardData() {
   const b = S.board || {};
   b.todos = b.todos || [];
@@ -448,7 +508,7 @@ function boardPay(b, d) {
     scheduled: (p.days || []).indexOf(d.getDay()) >= 0 };
 }
 function boardTodos(b) { const t = todayKey(); return b.todos.filter(x => !x.done || x.doneDay === t); }
-function yuan(v) { return Math.floor(v + 1e-9) + '金'; }
+function yuan(v) { return L('{0}金', Math.floor(v + 1e-9)); }
 function hmLeft(sec) { sec = Math.max(0, Math.ceil(sec / 60)); return Math.floor(sec / 60) + ':' + ('0' + sec % 60).slice(-2); }
 function boardTick() {
   const b = S.board;
@@ -457,13 +517,15 @@ function boardTick() {
   const keep = (b.todos || []).filter(x => !x.done || x.doneDay === t);
   let changed = keep.length !== (b.todos || []).length;
   if (b.today && b.today.day !== t) { b.today = null; changed = true; }
-  if (changed) { b.todos = keep; setBoard(b); }
+  b.todos = keep;
+  if (todoReminders(b)) changed = true;
+  if (changed) setBoard(b);
   const P = boardPay(boardData(), new Date());
   if (P && P.status === 'after' && b.remind !== false && P.sinceEnd < 1800 && get('boardNotified', '') !== t) {
     set('boardNotified', t);
     const left = boardTodos(b).filter(x => !x.done).length;
     const rang = playSfx('offwork', b);
-    notifyUser('下班啦', (b.showMoney !== false && P.daily ? '今天挣了 ' + yuan(P.daily) + '，' : '') + (left ? '还有 ' + left + ' 件待办留到明天' : '辛苦了'), rang);
+    notifyUser('下班啦', (b.showMoney !== false && P.daily ? L('今天挣了 {0}，', yuan(P.daily)) : '') + (left ? L('还有 {0} 件待办留到明天', left) : L('辛苦了')), rang);
   }
 }
 function boardTicked(before, after) {
@@ -476,19 +538,75 @@ function boardTicked(before, after) {
     else if (!t.done && was[t.id]) minus++;
   });
   if (!plus && !minus) return;
-  const L = todayLog();
-  L.notes = Math.max(0, (L.notes || 0) + plus - minus);
-  S.focusLog = L;
+  const LG = todayLog();
+  LG.notes = Math.max(0, (LG.notes || 0) + plus - minus);
+  S.focusLog = LG;
   pushFocus();
   if (plus) playSfx('tick', after);
 }
-async function addTodoDialog() {
-  const text = await promptText({ title: '添加今日待办', message: '写一件今天要做的事，回车添加。', placeholder: '比如：回复邮件', ok: '添加' });
-  const t = (text || '').trim().slice(0, 40);
-  if (!t) return;
+// Leaf menu → 公告板 → 添加待办…, or「＋ 添加待办」on the desktop board. Ticking
+//「到点提醒」(or touching the time) sets a reminder.
+function defaultTodoAt() { const d = new Date(Date.now() + 20 * 60000); d.setSeconds(0, 0); d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15); return d.getTime(); }
+// The box is a small frameless page (scene/todo.html) in the bulletin board's own look.
+let todoWin = null;        // {win, wc}
+function addTodoDialog() {
+  if (todoWin && !todoWin.win.isDestroyed()) { todoWin.win.show(); todoWin.win.focus(); return; }
+  const win = new BrowserWindow({ width: 440, height: 310, useContentSize: true, frame: false, resizable: false, minimizable: false, maximizable: false,
+    fullscreenable: false, skipTaskbar: false, alwaysOnTop: true, show: false, title: L('添加待办'), backgroundColor: '#5b3214', icon: appIcon(),
+    webPreferences: webPrefs('todo') });
+  win.setMenu(null);
+  todoWin = { win, wc: win.webContents };
+  win.on('closed', () => { forget(win); if (todoWin && todoWin.win === win) todoWin = null; });
+  win.once('ready-to-show', () => { win.center(); win.show(); win.focus(); remember(win); });
+  win.loadURL('sdv://app/todo.html');
+}
+function closeTodoWindow() {
+  const t = todoWin;
+  todoWin = null;
+  if (t && !t.win.isDestroyed()) t.win.destroy();
+}
+function onTodoMessage(body) {
+  if (body.type === 'hello') run(todoWin.wc, 'SDV_TODO.init(' + JSON.stringify({ lang: curLang(), at: defaultTodoAt() }) + ')');
+  else if (body.type === 'todoAdd') {
+    const t = String(body.text || '').trim().slice(0, 40);
+    closeTodoWindow();
+    if (t) addTodo(t, Number(body.at) || null);
+  } else if (body.type === 'todoCancel') closeTodoWindow();
+}
+function addTodo(t, at) {
   const b = boardData();
-  b.todos.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), text: t, done: false });
+  const todo = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), text: t, done: false };
+  if (at > 0) todo.at = at;
+  b.todos.push(todo);
   setBoard(b);
+  log('添加待办「' + t + '」' + (todo.at ? '，' + new Date(todo.at).toString() + ' 提醒' : ''));
+}
+function todoTimeLabel(at) {
+  const d = new Date(at), n = new Date();
+  const hm = d.getHours() + ':' + ('0' + d.getMinutes()).slice(-2);
+  const days = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - new Date(n.getFullYear(), n.getMonth(), n.getDate())) / 864e5);
+  return days === 0 ? hm : days === 1 ? L('明天 {0}', hm) : days === -1 ? L('昨天 {0}', hm) : (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hm;
+}
+// Every few seconds (boardTick): a to-do whose time has come gets its notification once.
+// One missed while the PC slept or the app was closed still comes, saying so; one more
+// than a day late is let go quietly.
+function todoReminders(b) {
+  const now = Date.now();
+  let changed = false;
+  for (const t of b.todos || []) {
+    if (!t.at || t.done || t.reminded || t.at > now) continue;
+    t.reminded = true; changed = true;
+    const late = now - t.at;
+    if (late > 864e5) continue;
+    const rang = playSfx('tick', b);
+    notifyUser('⏰ 待办提醒', t.text + (late > 10 * 60000 ? L('（原定 {0}，刚才没能提醒）', todoTimeLabel(t.at)) : ''), rang);
+    // the farm shows its own slip too, in case notifications are muted
+    const js = 'SDV.host.remind(' + JSON.stringify(t.text) + ',' + JSON.stringify(t.id) + ')';
+    callAll(js);
+    editorCall(js);
+    log('待办提醒：' + t.text);
+  }
+  return changed;
 }
 function boardAction(kind, val) {
   const b = boardData();
@@ -508,7 +626,7 @@ function boardAction(kind, val) {
 // ---------- small dialogs ----------
 function promptText(opts) {
   return new Promise(resolve => {
-    const win = new BrowserWindow({ width: 400, height: 210, useContentSize: true, resizable: false, minimizable: false, maximizable: false,
+    const win = new BrowserWindow({ width: opts.choices ? 460 : 400, height: opts.choices ? 230 : opts.time ? 250 : 210, useContentSize: true, resizable: false, minimizable: false, maximizable: false,
       title: opts.title || APP_NAME, show: false, autoHideMenuBar: true, alwaysOnTop: true, icon: appIcon(),
       webPreferences: { preload: UI_PRELOAD, contextIsolation: true, sandbox: true } });
     win.setMenu(null);
@@ -517,12 +635,76 @@ function promptText(opts) {
     const onDone = (e, v) => { if (e.sender === win.webContents) finish(v); };
     ipcMain.on('prompt:done', onDone);
     win.on('closed', () => finish(null));
+    opts = Object.assign({ cancelText: L('取消'), remindText: L('到点提醒'), okDefault: L('确定') }, opts);
     win.webContents.once('did-finish-load', () => { win.webContents.send('prompt:init', opts); win.show(); win.focus(); });
     win.loadFile(path.join(__dirname, 'prompt.html'));
   });
 }
+// ---------- 从存档导入布局 ----------
+// The settings page asks; we list the saves on this PC, the user picks one, and the page
+// gets what scene/savefile.js read from it (buildings, animals, pet). Read-only.
+let saveReader = null;
+const saveApi = () => saveReader || (saveReader = require(path.join(codeDir, 'savefile.js')));
+const savesDir = () => path.join(app.getPath('appData'), 'StardewValley', 'Saves');
+const SEASON_ZH = { spring: '春', summer: '夏', fall: '秋', winter: '冬' };
+function listSaves() {
+  const dir = savesDir();
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { return []; }
+  const out = [];
+  for (const n of names) {
+    if (n[0] === '.') continue;
+    const file = path.join(dir, n, n);
+    let st;
+    try { st = fs.statSync(file); } catch { continue; }
+    if (!st.isFile()) continue;
+    let info = null;
+    try { info = saveApi().info(fs.readFileSync(path.join(dir, n, 'SaveGameInfo'), 'utf8')); } catch { info = null; }
+    let label = info && info.farmName ? L('{0}农场', info.farmName) + (info.name ? L('（{0}）', info.name) : '') : n.replace(/_\d+$/, '');
+    if (info && info.year) label += L(' · 第 {0} 年{1}{2}', info.year, L(SEASON_ZH[info.season] || ''), info.day ? L(' {0} 日', info.day) : '');
+    out.push({ file, label, when: st.mtimeMs });
+  }
+  return out.sort((a, b) => b.when - a.when);   // the one played last first
+}
+let importOpen = false;
+async function importSaveDialog() {
+  if (importOpen) return;
+  importOpen = true;
+  try {
+    const list = listSaves();
+    let file = null;
+    if (list.length) {
+      const r = await promptText({ title: L('从存档导入布局'), message: L('选一个存档。只读取，不会改动存档。\n导入会替换现在的布局；现在的布局会先自动备份到「我的布局」。'),
+        choices: list.map((x, i) => (i + 1) + '. ' + x.label), ok: L('导入'), other: L('选择其他文件…') });
+      if (r && r.other) file = await chooseSaveFile();
+      else if (r && typeof r.index === 'number') file = (list[r.index] || {}).file;
+    } else {
+      const r = await dialog.showMessageBox({ type: 'info', title: APP_NAME, message: L('没找到星露谷的存档'),
+        detail: L('在 {0} 里没找到存档。\n存档在别处的话，可以手动选择存档文件（存档文件夹里和文件夹同名的那个文件）。', savesDir()), buttons: [L('选择存档文件…'), L('取消')], noLink: true });
+      if (r.response === 0) file = await chooseSaveFile();
+    }
+    if (!file) return;
+    log('从存档导入布局：' + file);
+    let msg;
+    try {
+      msg = { save: saveApi().parse(fs.readFileSync(file, 'utf8')) };
+      log('存档「' + msg.save.farmName + '」：' + msg.save.buildings.length + ' 座建筑');
+    } catch (e) {
+      log('读取存档失败：' + e);
+      msg = { error: L('读不了这个存档：{0}', L(e && e.message ? e.message : String(e))) };
+    }
+    editorCall('SDV.host.importSave(' + JSON.stringify(msg) + ')');
+    if (editor && !editor.win.isDestroyed()) { editor.win.show(); editor.win.focus(); }
+  } finally { importOpen = false; }
+}
+async function chooseSaveFile() {
+  const dir = savesDir();
+  const r = await dialog.showOpenDialog({ title: '选择星露谷的存档文件', defaultPath: fs.existsSync(dir) ? dir : undefined, properties: ['openFile'],
+    message: L('存档文件夹里和文件夹同名、没有后缀的那个文件') });
+  return r.canceled || !r.filePaths.length ? null : r.filePaths[0];
+}
 async function infoAlert(title, text) {
-  await dialog.showMessageBox({ type: 'info', title: APP_NAME, message: title, detail: text, buttons: ['好'], noLink: true });
+  await dialog.showMessageBox({ type: 'info', title: APP_NAME, message: L(title), detail: L(text), buttons: [L('好')], noLink: true });
 }
 
 // ---------- the weather city ----------
@@ -536,7 +718,7 @@ function autoLocation() {
 function currentLocation() { return autoLocation() || CITIES.DEFAULT_LOC; }
 function locationLabel() {
   if (S.location && S.location.name) return S.location.name;
-  return autoLocation() ? '跟随时区自动' : '杭州（默认）';
+  return L(autoLocation() ? '跟随时区自动' : '杭州（默认）');
 }
 function setLocation(loc) {
   log('设置天气城市：' + JSON.stringify(loc));
@@ -549,7 +731,7 @@ function setLocation(loc) {
   weatherTick();
 }
 async function geocode(name) {
-  const url = 'https://geocoding-api.open-meteo.com/v1/search?count=10&language=zh&format=json&name=' + encodeURIComponent(name);
+  const url = 'https://geocoding-api.open-meteo.com/v1/search?count=10&language=' + curLang() + '&format=json&name=' + encodeURIComponent(name);
   try {
     const r = await net.fetch(url, { signal: AbortSignal.timeout(10000) });
     if (!r.ok) return null;
@@ -559,14 +741,14 @@ async function geocode(name) {
 }
 async function chooseCity(list) {
   const buttons = list.map((r, i) => (i + 1) + '. ' + [r.name, r.admin1, r.country].filter(Boolean).join(' · '));
-  buttons.push('取消');
+  buttons.push(L('取消'));
   // noLink: false → Windows lists the choices as a column of command links
-  const res = await dialog.showMessageBox({ type: 'question', title: APP_NAME, message: '找到好几个，选一个', buttons, cancelId: buttons.length - 1, noLink: false });
+  const res = await dialog.showMessageBox({ type: 'question', title: APP_NAME, message: L('找到好几个，选一个'), buttons, cancelId: buttons.length - 1, noLink: false });
   return res.response < list.length ? list[res.response] : null;
 }
 async function cityDialog() {
-  const text = await promptText({ title: '天气跟着哪个城市？', message: '输入城市名，比如：北京、苏州、成都。\n国外城市也可以用英文，比如 Tokyo、London。',
-    placeholder: '城市名', value: S.location && S.location.name ? S.location.name : '' });
+  const text = await promptText({ title: L('天气跟着哪个城市？'), message: L('输入城市名，比如：北京、苏州、成都。\n国外城市也可以用英文，比如 Tokyo、London。'),
+    placeholder: L('城市名'), value: S.location && S.location.name ? S.location.name : '' });
   const t = (text || '').trim().slice(0, 40);
   log('更换城市：输入「' + t + '」');
   if (!t) return;
@@ -574,7 +756,7 @@ async function cityDialog() {
   if (hit) { setLocation(hit); return cityDone(); }
   const res = await geocode(t);
   if (res === null) return infoAlert('没连上网络', '这个城市要联网查一下位置，请检查网络后再试。');
-  if (!res.length) return infoAlert('没找到「' + t + '」', '换个写法试试：去掉「市」「县」，或者用拼音、英文。');
+  if (!res.length) return infoAlert(L('没找到「{0}」', t), '换个写法试试：去掉「市」「县」，或者用拼音、英文。');
   res.sort((a, b) => (b.population || 0) - (a.population || 0));
   const pick = res.length > 1 ? await chooseCity(res) : res[0];
   if (!pick) return;
@@ -582,7 +764,7 @@ async function cityDialog() {
   return cityDone();
 }
 function cityDone() {
-  return infoAlert('天气已切换到「' + S.location.name + '」', '日出日落马上按新城市计算，实时天气几秒后更新。\n菜单 天气 › 所在城市 里可以看到当前城市。');
+  return infoAlert(L('天气已切换到「{0}」', S.location.name), '日出日落马上按新城市计算，实时天气几秒后更新。\n菜单 天气 › 所在城市 里可以看到当前城市。');
 }
 
 // ---------- weather ----------
@@ -677,7 +859,7 @@ function listXnb(root) {
 function openSetup() {
   if (setup) closeSetup();
   const win = new BrowserWindow({ width: 560, height: 470, useContentSize: true, resizable: false, maximizable: false,
-    title: '欢迎使用 ' + APP_NAME, show: false, autoHideMenuBar: true, icon: appIcon(), webPreferences: webPrefs('setup') });
+    title: L('欢迎使用 {0}', APP_NAME), show: false, autoHideMenuBar: true, icon: appIcon(), webPreferences: webPrefs('setup') });
   win.setMenu(null);
   setup = { win, wc: win.webContents, tried: false };
   win.on('closed', () => { if (setup && setup.win === win) setup = null; if (!dataReady() && !scenes.length && !quitting) log('设置窗口关了，还没读取游戏画面'); });
@@ -689,18 +871,18 @@ function setupCall(js) { if (setup) run(setup.wc, js); }
 async function sendSetupStart() {
   const c = await findContent();
   if (!setup) return;
-  if (!c) { setupCall('SDV_SETUP.start(' + JSON.stringify({ content: null, tried: setup.tried }) + ')'); return; }
+  if (!c) { setupCall('SDV_SETUP.start(' + JSON.stringify({ content: null, tried: setup.tried, lang: curLang() }) + ')'); return; }
   S.contentDir = c;
   const files = listXnb(c);
   log('游戏素材：' + c + '（' + files.length + ' 个文件）');
-  setupCall('SDV_SETUP.start(' + JSON.stringify({ content: c, files, music: S.music }) + ')');
+  setupCall('SDV_SETUP.start(' + JSON.stringify({ content: c, files, music: S.music, lang: curLang() }) + ')');
 }
 async function onSetupMessage(m) {
   if (m.type === 'hello') sendSetupStart();
   else if (m.type === 'choose') {
     const r = await dialog.showOpenDialog(setup ? setup.win : undefined, {
-      title: '选择 Stardew Valley 所在的文件夹', properties: ['openDirectory'],
-      message: '选择星露谷物语的安装文件夹（里面有 Content 文件夹）',
+      title: L('选择 Stardew Valley 所在的文件夹'), properties: ['openDirectory'],
+      message: L('选择星露谷物语的安装文件夹（里面有 Content 文件夹）'),
     });
     if (!setup) return;
     if (!r.canceled && r.filePaths[0]) { setup.tried = true; const c = resolveContent(r.filePaths[0]); if (c) S.contentDir = c; }
@@ -733,14 +915,38 @@ function reloadScenes() {
 // ---------- music and sound effects ----------
 // The game's own tracks, taken out of its wave bank the first time they're wanted, and
 // played by a hidden window (audio.html) a track at a time with a quiet gap between.
-const MUSIC = {
+// Which tracks: scene/music.js lists the game's music (cue → wave number); by default
+// the three of the current season, or the user's own playlist from the settings window.
+const MUSIC_FALLBACK = {
   spring: [['spring1', 93], ['spring2', 91], ['spring3', 92]],
   summer: [['summer1', 122], ['summer2', 123], ['summer3', 115]],
   fall: [['fall1', 121], ['fall2', 119], ['fall3', 120]],
   winter: [['winter1', 126], ['winter2', 124], ['winter3', 125]],
 };
+let musicLibCache = null;
+function musicLib() {
+  if (musicLibCache) return musicLibCache;
+  try { musicLibCache = new Function(fs.readFileSync(path.join(codeDir, 'music.js'), 'utf8') + '\n;return SDV_MUSIC;')(); }
+  catch (e) { log('读不了曲目表：' + e); }
+  return musicLibCache;
+}
+function normalizePick(v) {
+  const o = v && typeof v === 'object' ? v : {};
+  return { mode: o.mode === 'list' ? 'list' : 'season', list: Array.isArray(o.list) ? o.list.filter(x => typeof x === 'string').slice(0, 80) : [],
+    order: o.order === 'order' ? 'order' : 'shuffle' };
+}
+function trackName(id) { const ML = musicLib(), t = ML && ML.byId[id]; return t ? (curLang() === 'en' ? t.en : t.zh) : id; }
+function musicPool() {
+  const ML = musicLib(), P = S.musicPick;
+  if (ML && P.mode === 'list') {
+    const list = P.list.map(id => ML.byId[id]).filter(Boolean).map(t => [t.id, t.wave]);
+    if (list.length) return { key: 'list', tracks: list };
+  }
+  const season = currentSeason();
+  return { key: season, tracks: ML ? ML.seasons[season].map(id => [id, ML.byId[id].wave]) : MUSIC_FALLBACK[season] };
+}
 const SFX = { tick: 5, offwork: 326 };
-const music = { playing: null, season: null, last: null, gapUntil: 0, stopAt: 0, failed: {}, preparing: null };
+const music = { playing: null, key: null, last: null, gapUntil: 0, stopAt: 0, failed: {}, preparing: null, request: null, preview: false, status: '' };
 const sfx = { tried: false, sent: {} };
 function musicFile(name) { return path.join(MUSIC_DIR, name + '.wav'); }
 function waveBank() { return S.contentDir ? path.join(S.contentDir, 'XACT', 'Wave Bank.xwb') : null; }
@@ -757,8 +963,13 @@ function audioSend(channel, data) {
   if (w.webContents.isLoading()) w.webContents.once('did-finish-load', () => w.webContents.send(channel, data));
   else w.webContents.send(channel, data);
 }
-ipcMain.on('audio:ended', (e, m) => { if (music.playing === m.name) { music.playing = null; music.gapUntil = Date.now() + (20 + Math.random() * 40) * 1000; } });
-ipcMain.on('audio:error', (e, m) => { log('播放失败：' + m.name + ' ' + m.message); if (music.playing === m.name) { music.playing = null; music.gapUntil = Date.now() + 60000; } });
+ipcMain.on('audio:ended', (e, m) => {
+  if (music.playing !== m.name) return;
+  music.playing = null; music.preview = false;
+  music.gapUntil = Date.now() + (music.key === 'list' ? 3 + Math.random() * 5 : 20 + Math.random() * 40) * 1000;
+  pushMusicState();
+});
+ipcMain.on('audio:error', (e, m) => { log('播放失败：' + m.name + ' ' + m.message); if (music.playing === m.name) { music.playing = null; music.failed[m.name] = '播放失败'; music.gapUntil = Date.now() + 5000; pushMusicState(); } });
 function extractTracks(tracks, label) {
   const xwb = waveBank();
   if (!xwb || !fs.existsSync(xwb)) return null;
@@ -789,48 +1000,97 @@ function musicStop(fade) {
   if (fade) { audioSend('audio:volume', { volume: 0, seconds: 1.5 }); music.stopAt = Date.now() + 1600; }
   else { audioSend('audio:stop'); music.playing = null; music.stopAt = 0; }
 }
+function nextTrack(pool) {
+  const all = pool.tracks;
+  if (music.request) {
+    const ML = musicLib(), t = ML && ML.byId[music.request];
+    if (t) return [t.id, t.wave];
+    music.request = null;
+  }
+  if (!all.length) return null;
+  if (S.musicPick.order === 'order' && pool.key === 'list') {
+    const i = all.findIndex(t => t[0] === music.last);
+    return all[(i + 1) % all.length];
+  }
+  let choices = all.filter(t => t[0] !== music.last && !music.failed[t[0]]);
+  if (!choices.length) choices = all.filter(t => !music.failed[t[0]]);
+  return choices.length ? choices[Math.floor(Math.random() * choices.length)] : null;
+}
 function musicTick() {
   if (music.stopAt && Date.now() >= music.stopAt) musicStop(false);
-  if (!musicWanted()) { if (music.playing && !music.stopAt) musicStop(true); return; }
-  const season = currentSeason();
-  let ready = MUSIC[season].filter(t => fs.existsSync(musicFile(t[0])));
-  if (ready.length < 3 && !music.failed[season]) {
-    music.preparing = season;
-    const done = extractTracks(MUSIC[season], season + ' 配乐');
-    music.preparing = null;
-    if (!done) { music.failed[season] = waveBank() ? '配乐准备失败，详情见日志' : '找不到游戏的音乐文件'; }
-    ready = MUSIC[season].filter(t => fs.existsSync(musicFile(t[0])));
-  }
+  const want = musicWanted() || Boolean(music.request) || Boolean(music.preview && music.playing && !music.stopAt);
+  if (!want) { if (music.playing && !music.stopAt) musicStop(true); pushMusicState(); return; }
+  const pool = musicPool();
   if (music.playing) {
     if (music.stopAt) return;
-    if (music.season !== season) { musicStop(true); return; }
+    if (music.request || music.key !== pool.key) musicStop(true);   // asked for another / a new season: fade out
     return;
   }
-  if (Date.now() < music.gapUntil || !ready.length) return;
-  const choices = ready.filter(t => t[0] !== music.last);
-  const list = choices.length ? choices : ready;
-  const pick = list[Math.floor(Math.random() * list.length)];
+  if (Date.now() < music.gapUntil && !music.request) { pushMusicState(); return; }
+  const pick = nextTrack(pool);
+  if (!pick) { pushMusicState(); return; }
+  if (!fs.existsSync(musicFile(pick[0]))) {
+    if (music.failed[pick[0]]) { if (music.request === pick[0]) music.request = null; music.last = pick[0]; pushMusicState(); return; }
+    music.preparing = { label: trackName(pick[0]), ids: [pick[0]] };
+    pushMusicState();
+    const done = extractTracks([pick], trackName(pick[0]));
+    music.preparing = null;
+    if (!done || !fs.existsSync(musicFile(pick[0]))) { music.failed[pick[0]] = waveBank() ? '配乐准备失败，详情见日志' : '找不到游戏的音乐文件'; pushMusicState(); return; }
+  }
   let bytes;
-  try { bytes = fs.readFileSync(musicFile(pick[0])); } catch { music.gapUntil = Date.now() + 60000; return; }
+  music.request = null;
+  try { bytes = fs.readFileSync(musicFile(pick[0])); } catch { music.failed[pick[0]] = '播放失败'; music.gapUntil = Date.now() + 5000; return; }
   audioSend('audio:music', { name: pick[0], bytes, volume: MUSIC_VOL[S.musicVolume], fadeIn: 3 });
-  music.playing = pick[0]; music.season = season; music.last = pick[0];
+  music.playing = pick[0]; music.key = pool.key; music.last = pick[0];
   log('播放 ' + pick[0]);
+  pushMusicState();
 }
 function musicStatus() {
-  const season = currentSeason(), zh = { spring: '春', summer: '夏', fall: '秋', winter: '冬' }[season];
-  if (S.music === 'off') return null;
-  if (music.preparing) return '正在从游戏里取出' + zh + '天的配乐…';
-  if (music.failed[season]) return music.failed[season];
-  if (music.playing && !music.stopAt) return '正在播放：' + zh + ' · 第 ' + music.last.slice(-1) + ' 首';
-  return S.music === 'saver' ? '屏保时播放' + zh + '天的配乐' : '配乐间歇中';
+  const zh = L({ spring: '春', summer: '夏', fall: '秋', winter: '冬' }[currentSeason()]);
+  if (S.music === 'off' && !music.playing) return null;
+  if (music.preparing) return L('正在从游戏里取出「{0}」…', trackName(music.preparing.ids[0]));
+  if (music.playing && !music.stopAt) return L('正在播放：{0}', trackName(music.last));
+  const pool = musicPool(), bad = pool.tracks.filter(t => music.failed[t[0]]);
+  if (bad.length && bad.length === pool.tracks.length) return L(music.failed[bad[0][0]]);
+  if (S.music === 'saver') return pool.key === 'list' ? L('屏保时播放我的歌单') : L('屏保时播放{0}天的配乐', zh);
+  return L('配乐间歇中');
+}
+// The settings window's 音乐 page: what's set and what's playing.
+function musicState() {
+  return { music: S.music, volume: S.musicVolume, pick: S.musicPick, now: music.playing && !music.stopAt ? music.last : null,
+    preparing: music.preparing ? music.preparing.ids : [], status: musicStatus() || '', season: currentSeason() };
+}
+function pushMusicState() {
+  const st = JSON.stringify(musicState());
+  if (st === music.status) return;
+  music.status = st;
+  editorCall('SDV.host.apply("musicState",' + st + ')');
+}
+function musicPlay(id) {
+  const ML = musicLib();
+  if (!ML || !ML.byId[id]) return;
+  music.request = id; music.gapUntil = 0;
+  music.preview = !musicWanted();                 // 试听 while the music is off: just this track
+  delete music.failed[id];
+  musicTick();
+}
+function musicNext() {
+  music.request = null;
+  const n = nextTrack(musicPool());
+  if (n) musicPlay(n[0]);
+}
+function openMusicPanel() {
+  const ready = editor && editor.ready;
+  openEditor();
+  if (ready) editorCall('SDV.host.openTab("music")'); else musicPanelWanted = true;
 }
 
 // ---------- policy: when to render, how fast ----------
 function stopReason() {
-  if (saver) return '屏保运行中';
-  if (S.paused) return '已暂停';
-  if (locked) return '锁屏中，已停止';
-  if (asleep) return '睡眠中，已停止';
+  if (saver) return L('屏保运行中');
+  if (S.paused) return L('已暂停');
+  if (locked) return L('锁屏中，已停止');
+  if (asleep) return L('睡眠中，已停止');
   return null;
 }
 function fpsFor(i) {
@@ -961,21 +1221,21 @@ function setAndTell(kind, val) { applySetting(kind, val); editorCall('SDV.host.a
 function boardMenu() {
   const b = boardData(), P = boardPay(b, new Date()), list = boardTodos(b);
   const open = list.filter(x => !x.done).length;
-  let title = '公告板';
-  if (P && P.status === 'work') title += ' · 还有 ' + hmLeft(P.toEnd) + ' 下班';
-  else if (P && P.status === 'lunch') title += ' · 午休中';
-  else if (P && P.status === 'after') title += ' · 下班啦';
-  else if (P && P.status === 'rest') title += ' · 今天休息';
-  else if (open) title += ' · 待办 ' + open;
+  let title = L('公告板');
+  if (P && P.status === 'work') title += L(' · 还有 {0} 下班', hmLeft(P.toEnd));
+  else if (P && P.status === 'lunch') title += L(' · 午休中');
+  else if (P && P.status === 'after') title += L(' · 下班啦');
+  else if (P && P.status === 'rest') title += L(' · 今天休息');
+  else if (open) title += L(' · 待办 {0}', open);
   const sub = [];
   if (!list.length) sub.push(item('今天还没有待办'));
   list.slice().sort((a, c) => Number(Boolean(a.done)) - Number(Boolean(c.done))).slice(0, 12)
-    .forEach(x => sub.push(radio(x.text, x.done, () => boardAction('todo', x.id))));
+    .forEach(x => sub.push(radio((x.at ? '⏰' + todoTimeLabel(x.at) + ' ' : '') + x.text, x.done, () => boardAction('todo', x.id))));
   if (P) {
     sub.push(sep);
-    if (P.status !== 'rest' && b.showMoney !== false && P.daily) sub.push(item('今日已挣 ' + yuan(P.status === 'after' ? P.daily : P.earned) + ' / ' + yuan(P.daily)));
-    if (P.status === 'work') sub.push(item('下班倒计时 ' + hmLeft(P.toEnd)));
-    else if (P.status === 'before') sub.push(item('还没上班 · ' + hmLeft(P.toStart) + ' 后开始'));
+    if (P.status !== 'rest' && b.showMoney !== false && P.daily) sub.push(item(L('今日已挣 {0} / {1}', yuan(P.status === 'after' ? P.daily : P.earned), yuan(P.daily))));
+    if (P.status === 'work') sub.push(item(L('下班倒计时 {0}', hmLeft(P.toEnd))));
+    else if (P.status === 'before') sub.push(item(L('还没上班 · {0} 后开始', hmLeft(P.toStart))));
     if (b.today && b.today.day === todayKey()) sub.push(item('今天恢复平常安排', () => boardAction('boardDay', 'auto')));
     else if (P.scheduled) sub.push(item('今天请假 / 调休（不算工资）', () => boardAction('boardDay', 'off')));
     else sub.push(item('今天调休要上班', () => boardAction('boardDay', 'work')));
@@ -992,7 +1252,7 @@ function buildMenu() {
     .map(o => radio(o[1], o[0] === S.season, () => setAndTell('season', o[0]))) });
   const wsub = [['live', '实时天气'], ['sunny', '晴'], ['cloudy', '阴'], ['rain', '雨'], ['storm', '雷雨'], ['snow', '雪'], ['fog', '雾'], ['windy', '大风']]
     .map(o => radio(o[1], o[0] === S.weather, () => setAndTell('weather', o[0])));
-  wsub.push(sep, item('所在城市：' + locationLabel()), item('更换城市…', () => cityDialog()));
+  wsub.push(sep, item(L('所在城市：{0}', locationLabel())), item('更换城市…', () => cityDialog()));
   if (S.location) wsub.push(item('改回跟随时区自动', () => setLocation(null)));
   T.push({ label: '天气', submenu: wsub });
   T.push({ label: '宠物', submenu: PETS.map(o => radio(o[1], o[0] === S.pet, () => setAndTell('pet', o[0]))) });
@@ -1001,11 +1261,17 @@ function buildMenu() {
   sv.push(sep, item('立即预览', () => startSaver(true)));
   T.push({ label: '屏保', submenu: sv });
   const mu = [['off', '关闭'], ['always', '一直播放'], ['saver', '只在屏保时播放']]
-    .map(o => radio(o[1], o[0] === S.music, () => { S.music = o[0]; music.gapUntil = 0; music.failed = {}; musicTick(); }));
+    .map(o => radio(o[1], o[0] === S.music, () => { S.music = o[0]; music.gapUntil = 0; music.failed = {}; musicTick(); pushMusicState(); }));
   if (S.music !== 'off') {
+    const pk = S.musicPick;
+    const setMode = m => { if (m === 'list' && !S.musicPick.list.length) { openMusicPanel(); return; } const v = S.musicPick; v.mode = m; S.musicPick = v; music.gapUntil = 0; musicTick(); pushMusicState(); };
+    mu.push(sep,
+      radio('跟随季节（游戏里这个季节的三首）', pk.mode !== 'list', () => setMode('season')),
+      radio(pk.list.length ? L('我的歌单（{0} 首）', pk.list.length) : '我的歌单（还没选歌）', pk.mode === 'list', () => setMode('list')),
+      item('选歌…', () => openMusicPanel()), item('下一首', () => musicNext()));
     mu.push(sep);
     [['low', '音量：小'], ['mid', '音量：中'], ['high', '音量：大']].forEach(o => mu.push(radio(o[1], o[0] === S.musicVolume, () => {
-      S.musicVolume = o[0]; if (music.playing) audioSend('audio:volume', { volume: MUSIC_VOL[o[0]], seconds: 0.4 });
+      S.musicVolume = o[0]; if (music.playing) audioSend('audio:volume', { volume: MUSIC_VOL[o[0]], seconds: 0.4 }); pushMusicState();
     })));
     const ms = musicStatus();
     if (ms) mu.push(sep, item(ms));
@@ -1014,30 +1280,32 @@ function buildMenu() {
   const fo = S.focus;
   if (fo && !fo.done) {
     const left = Math.max(1, Math.ceil((fo.start + fo.dur - Date.now() / 1000) / 60));
-    T.push({ label: '专注中 · 还剩 ' + left + ' 分钟', submenu: [item(fo.cropZh + '正在长，还剩 ' + left + ' 分钟'), item('放弃这次专注', giveUpFocus)] });
+    T.push({ label: L('专注中 · 还剩 {0} 分钟', left), submenu: [item(L('{0}正在长，还剩 {1} 分钟', L(fo.cropZh), left)), item('放弃这次专注', giveUpFocus)] });
   } else {
     const fs2 = [item('25 分钟', () => startFocus(25)), item('50 分钟', () => startFocus(50))];
-    if (shippedToday()) fs2.push(sep, item('今天出货：' + focusSummary()));
+    if (shippedToday()) fs2.push(sep, item(L('今天出货：{0}', focusSummary())));
     T.push({ label: '开始专注种田', submenu: fs2 });
   }
   T.push(boardMenu());
-  if (S.mailWatch && mail.fresh.length) T.push(item('信箱里有 ' + mail.fresh.length + ' 个新文件 · 标记为已读', markMailRead));
-  if (timeOverride != null) T.push(item('恢复实时时间（现在是模拟的 ' + Math.floor(timeOverride) + ':' + ('0' + Math.round((timeOverride % 1) * 60)).slice(-2) + '）',
+  if (S.mailWatch && mail.fresh.length) T.push(item(L('信箱里有 {0} 个新文件 · 标记为已读', mail.fresh.length), markMailRead));
+  if (timeOverride != null) T.push(item(L('恢复实时时间（现在是模拟的 {0}）', Math.floor(timeOverride) + ':' + ('0' + Math.round((timeOverride % 1) * 60)).slice(-2)),
     () => setAndTell('time', null)));
   T.push(sep);
   T.push(item(S.paused ? '继续' : '暂停', () => { S.paused = !S.paused; applyPolicy(); }));
   T.push(item('打开设置窗口…', openEditor));
-  const more = Object.keys(QUALITY).map(k => radio('画质：' + QUALITY[k].title, k === S.quality, () => { S.quality = k; applyPolicy(); }));
+  const more = Object.keys(QUALITY).map(k => radio(L('画质：{0}', L(QUALITY[k].title)), k === S.quality, () => { S.quality = k; applyPolicy(); }));
   more.push(sep, radio('新文件提醒（信箱）', S.mailWatch, () => { S.mailWatch = !S.mailWatch; mail.known = {}; mail.fresh = []; mailTick(); }));
+  more.push(radio('镜头跟随鼠标（鼠标移到屏幕边缘时移动）', S.follow, () => { applySetting('follow', !S.follow); editorCall('SDV.host.apply("follow",' + JSON.stringify(S.follow) + ')'); }));
   more.push(radio('开机时启动', loginEnabled(), () => setLogin(!loginEnabled())));
+  more.push({ label: '语言 / Language', submenu: [['auto', '跟随系统 / System'], ['zh', '中文'], ['en', 'English']].map(o => radio(o[1], o[0] === S.lang, () => setLang(o[0]))) });
   if (WIN) more.push(sep, { label: '桌面显示方式', submenu: [['auto', '自动（推荐）'], ['nolayer', '兼容模式（农场黑屏或不显示时试试）'], ['window', '普通窗口（会盖住桌面图标）']]
     .map(o => radio(o[1], o[0] === S.desktopMode, () => { S.desktopMode = o[0]; log('桌面显示方式：' + o[0]); buildScenes(); })) });
   more.push(sep, item('重新加载场景', () => { buildScenes(); }), item('重新读取游戏画面…', openSetup));
   more.push(sep, item('打开日志文件夹', () => shell.openPath(SUPPORT)));
   T.push({ label: '更多', submenu: more });
   T.push(sep);
-  T.push(item('退出 ' + APP_NAME, () => { quitting = true; app.quit(); }));
-  return Menu.buildFromTemplate(T);
+  T.push(item(L('退出 {0}', APP_NAME), () => { quitting = true; app.quit(); }));
+  return Menu.buildFromTemplate(translateMenu(T));
 }
 function trayStatus() { const r = stopReason(); return APP_NAME + (r ? ' · ' + r : ''); }
 function makeTray() {
@@ -1051,7 +1319,7 @@ function makeTray() {
 // ---------- start ----------
 app.on('second-instance', () => openEditor());
 app.on('window-all-closed', () => { /* keep running in the notification area */ });
-app.on('before-quit', () => { quitting = true; });
+app.on('before-quit', () => { quitting = true; flushSettings(); });
 
 app.whenReady().then(guard('start', async () => {
   serveScene();
@@ -1082,5 +1350,5 @@ app.whenReady().then(guard('start', async () => {
   log('Stardew Desk 已启动（Windows 版），代码 ' + codeDir + '，运行目录 ' + sceneDir);
   // automated tests only (never set in the shipped app)
   if (process.env.SDV_TEST && !app.isPackaged) global.SDV_TEST_HOOKS = { S, buildMenu, openEditor, addTodoDialog, cityDialog, setLocation,
-    startSaver, stopSaver, musicTick, playSfx, boardData, settingsScript, get scenes() { return scenes; }, get saver() { return saver; }, music, MUSIC_DIR };
+    startSaver, stopSaver, musicTick, playSfx, boardData, settingsScript, importSaveDialog, listSaves, todoReminders, boardTick, flushSettings, get scenes() { return scenes; }, get saver() { return saver; }, music, MUSIC_DIR };
 }));

@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>添加待办</title>
+<style>
+  /* The add-a-to-do box, in the bulletin board's own look: the special-orders board's wood,
+     its taped paper note, the game's lettering and pieces from Cursors — all drawn on the
+     canvas. The real inputs sit on top, invisible: they only take the typing (and the
+     input method); what they hold is lettered on the canvas in the game's font. */
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; user-select: none; -webkit-user-select: none; cursor: default; }
+  canvas#bg { position: fixed; inset: 0; width: 100%; height: 100%; -webkit-app-region: drag; }   /* Windows: drag the frameless box by its wood */
+  .type {
+    position: fixed; box-sizing: border-box; border: 0; outline: none; background: transparent; padding: 0 12px;
+    font: 600 16px/1 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: transparent; caret-color: transparent; -webkit-app-region: no-drag; user-select: text; -webkit-user-select: text; cursor: text;
+  }
+  .type::selection { background: transparent; color: transparent; }
+  .hit { position: fixed; cursor: pointer; background: transparent; border: 0; padding: 0; -webkit-app-region: no-drag; }
+  .hit:focus { outline: none; }
+</style>
+</head>
+<body>
+<canvas id="bg"></canvas>
+<input id="text" class="type" type="text" maxlength="40" autocomplete="off" spellcheck="false" tabindex="1">
+<input id="dayIn" class="type" type="text" maxlength="16" autocomplete="off" spellcheck="false" tabindex="2">
+<input id="timeIn" class="type" type="text" maxlength="10" autocomplete="off" spellcheck="false" tabindex="3">
+<button id="remind" class="hit" tabindex="-1"></button>
+<button id="dayL" class="hit" tabindex="-1"></button>
+<button id="dayR" class="hit" tabindex="-1"></button>
+<button id="timeL" class="hit" tabindex="-1"></button>
+<button id="timeR" class="hit" tabindex="-1"></button>
+<button id="cancel" class="hit" tabindex="-1"></button>
+<button id="ok" class="hit" tabindex="-1"></button>
+<script src="i18n.js"></script>
+<script src="i18n-en.js"></script>
+<script src="data/font.js"></script>
+<script src="data/farm.js"></script>
+<script src="board.js"></script>
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const post = m => { try { window.webkit.messageHandlers.sdv.postMessage(m); } catch { console.log('post', JSON.stringify(m)); } };
+  const tr = (...a) => (window.SDV_I18N ? SDV_I18N.L(...a) : a[0]);
+  const isEn = () => Boolean(window.SDV_I18N && SDV_I18N.get() === 'en');
+  const UI = SDV.board.ui;
+  const CUR = (window.SDV_DATA && SDV_DATA.crops && SDV_DATA.crops.cursors) || [140, 373];
+  const pad = n => String(n).padStart(2, '0');
+  const PAPER = '#fff7e2', EDGE = '#8a5a33', LINE = '#e2c79a', RED = '#b8322a', PH = '#b39a76';
+
+  const images = {};
+  const loadImg = n => new Promise(res => { const i = new Image(); i.onload = () => { images[n] = i; res(); }; i.onerror = () => res(); i.src = `data/img/${n}.png`; });
+
+  // when: a day (0 today, 1 tomorrow …) and minutes into it. The arrows step a day / 15
+  // minutes; typing in the boxes sets any date and any minute.
+  const state = { remind: false, day: 0, min: 0, hover: null, sent: false, blink: true, focus: null, bad: null };
+  const MAX_DAYS = 400;
+  const startOfDay = off => { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + off); return d; };
+  const dayOf = d => { const x = new Date(d); x.setHours(0, 0, 0, 0); return Math.round((x - startOfDay(0)) / 86400000); };
+  const atMs = () => startOfDay(state.day).getTime() + state.min * 60000;
+  function setAt(ms) {
+    const d = new Date(ms);
+    state.day = Math.max(0, dayOf(d));
+    state.min = d.getHours() * 60 + d.getMinutes();
+  }
+  const nextQuarter = () => { const d = new Date(Date.now() + 20 * 60000); d.setSeconds(0, 0); d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15); return d.getTime(); };
+  function dayLabel() {
+    if (state.day === 0) return tr('今天');
+    if (state.day === 1) return tr('明天');
+    if (state.day === 2) return tr('后天');
+    const d = startOfDay(state.day), y = d.getFullYear() !== new Date().getFullYear();
+    if (isEn()) return d.toLocaleDateString('en-US', y ? { year: 'numeric', month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric' });
+    return `${y ? d.getFullYear() + '年' : ''}${d.getMonth() + 1}月${d.getDate()}日`;
+  }
+  const timeLabel = () => `${pad(Math.floor(state.min / 60))}:${pad(state.min % 60)}`;
+  const past = () => state.remind && atMs() <= Date.now();
+
+  // ---------- reading what was typed ----------
+  const CN = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+  // 十二 → 12, 二十五 → 25, 三十一 → 31 (small numbers only)
+  const cnNum = s => s.replace(/[零〇一二两三四五六七八九十]+/g, m => {
+    if (!m.includes('十')) return [...m].map(c => CN[c]).join('');
+    const [a, b] = m.split('十');
+    return String((a ? CN[a] : 1) * 10 + (b ? CN[b] : 0));
+  });
+  const norm = s => cnNum(String(s || '').trim().toLowerCase().replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xfee0)).replace(/：/g, ':').replace(/\s+/g, ' '));
+  // A day: 今天/明天/后天/大后天, today/tomorrow, 周五/下周一/friday, 10/25, 10-25, 10.25,
+  // 10月25日, 2026-10-25, 2026/10/25, 25号 / 25日 (this month, or next if it has gone).
+  // Returns the day offset from today, or null.
+  function parseDay(raw) {
+    const s = norm(raw);
+    if (!s) return null;
+    const words = { 今天: 0, 今日: 0, today: 0, 明天: 1, 明日: 1, tomorrow: 1, tmr: 1, 后天: 2, 大后天: 3 };
+    if (s in words) return words[s];
+    let m = /^(\d+)\s*天后$|^in (\d+) days?$/.exec(s);
+    if (m) return Number(m[1] || m[2]);
+    // weekdays
+    const WD = { 日: 0, 天: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6 };
+    const EN_WD = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+    m = /^(下下|下)?(?:周|星期|礼拜)([日天1-6一二三四五六])$/.exec(raw.trim().replace(/\s+/g, ''));
+    let wd = null, next = 0;
+    if (m) { wd = /\d/.test(m[2]) ? Number(m[2]) : WD[m[2]]; next = m[1] === '下下' ? 2 : m[1] ? 1 : 0; }
+    else { m = /^(next )?(sun|mon|tue|wed|thu|fri|sat)[a-z]*$/.exec(s); if (m) { wd = EN_WD.indexOf(m[2]); next = m[1] ? 1 : 0; } }
+    if (wd != null) {
+      const today = new Date().getDay();
+      if (next) {   // 下周X: X in next week (weeks start on Monday)
+        const mon = ((today + 6) % 7);
+        return 7 * next - mon + ((wd + 6) % 7);
+      }
+      return (wd - today + 7) % 7;
+    }
+    const now = new Date(), y0 = now.getFullYear();
+    let y = null, mo = null, d = null;
+    if ((m = /^(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})\s*[日号]?$/.exec(s))) [y, mo, d] = [+m[1], +m[2], +m[3]];
+    else if ((m = /^(\d{1,2})\s*[-/.月]\s*(\d{1,2})\s*[日号]?$/.exec(s))) [mo, d] = [+m[1], +m[2]];
+    else if ((m = /^(\d{1,2})\s*[日号]$/.exec(s))) { mo = now.getMonth() + 1; d = +m[1]; }
+    else if ((m = /^([a-z]{3})[a-z]*\.? (\d{1,2})(?:st|nd|rd|th)?(?:,? (\d{4}))?$/.exec(s)) || (m = /^(\d{1,2})(?:st|nd|rd|th)? ([a-z]{3})[a-z]*\.?(?:,? (\d{4}))?$/.exec(s))) {
+      const MON = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+      const a = /^\d/.test(m[1]) ? [m[2], m[1]] : [m[1], m[2]];
+      mo = MON.indexOf(a[0]) + 1; d = +a[1]; y = m[3] ? +m[3] : null;
+      if (!mo) return null;
+    } else return null;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    const make = yy => { const t = new Date(yy, mo - 1, d); return t.getMonth() === mo - 1 ? t : null; };
+    let t = make(y || y0);
+    if (!t) return null;
+    if (!y && dayOf(t) < 0) {                  // already gone this year: next time round
+      if (/^(\d{1,2})\s*[日号]$/.test(s)) { const n = new Date(y0, now.getMonth() + 1, d); t = n.getDate() === d ? n : null; }
+      else t = make(y0 + 1);
+      if (!t) return null;
+    }
+    const off = dayOf(t);
+    return off >= 0 && off <= MAX_DAYS ? off : null;
+  }
+  // A time: 14:30, 1430, 14, 9:5, 2:30pm, 2pm, 下午3点, 晚上8点半, 9点15, 9点15分.
+  // Returns minutes into the day, or null.
+  function parseTime(raw) {
+    let s = norm(raw).replace(/\s/g, '');
+    if (!s) return null;
+    let pm = null;
+    const pmWords = /^(下午|晚上|傍晚|中午)/, amWords = /^(上午|早上|早晨|凌晨|清晨)/;
+    if (pmWords.test(s)) { pm = s.startsWith('中午') ? 'noon' : true; s = s.replace(pmWords, ''); }
+    else if (amWords.test(s)) { pm = false; s = s.replace(amWords, ''); }
+    let m = /^(\d{1,2})(am|pm|a|p)?$/.exec(s.replace(/[.:]00$/, ''));
+    let h = null, mi = 0, suf = null;
+    if ((m = /^(\d{1,2})[:.](\d{1,2})(am|pm|a|p)?$/.exec(s))) { h = +m[1]; mi = +m[2]; suf = m[3]; }
+    else if ((m = /^(\d{1,2})点(半|一刻|三刻|(\d{1,2})分?)?$/.exec(s))) { h = +m[1]; mi = m[2] === '半' ? 30 : m[2] === '一刻' ? 15 : m[2] === '三刻' ? 45 : m[3] ? +m[3] : 0; }
+    else if ((m = /^(\d{3,4})$/.exec(s))) { h = Math.floor(+m[1] / 100); mi = +m[1] % 100; }
+    else if ((m = /^(\d{1,2})(am|pm|a|p)?$/.exec(s))) { h = +m[1]; suf = m[2]; }
+    else return null;
+    if (suf) pm = suf[0] === 'p';
+    if (pm === true && h < 12) h += 12;
+    if (pm === 'noon' && h < 6) h += 12;
+    if (pm === false && h === 12) h = 0;
+    if (h > 23 || mi > 59) return null;
+    return h * 60 + mi;
+  }
+
+  const cv = $('bg'), g = cv.getContext('2d');
+  let k = 1, W = 0, H = 0, box = {};
+  const INPUTS = { text: 'text', day: 'dayIn', time: 'timeIn' };
+
+  // Layout in CSS px; the canvas draws in device px.
+  function layout() {
+    k = window.devicePixelRatio || 1;
+    const w = window.innerWidth, h = window.innerHeight;
+    W = Math.round(w * k); H = Math.round(h * k);
+    cv.width = W; cv.height = H;
+    const m = 14, px = m + 28, cw = w - 2 * px;
+    const A = 26, V = { day: 104, time: 72 }, gap = 4;     // arrow, value widths
+    const sw = A * 4 + V.day + V.time + gap * 4 + 18;
+    const sx = Math.round((w - sw) / 2), sy = m + 152;
+    box = {
+      paper: { x: m, y: m, w: w - 2 * m, h: h - 2 * m },
+      title: { y: m + 36 },
+      text: { x: px, y: m + 60, w: cw, h: 38 },
+      remind: { x: px, y: m + 112, w: 150, h: 26 },
+      dayL: { x: sx, y: sy, w: A, h: 28 },
+      day: { x: sx + A + gap, y: sy, w: V.day, h: 28 },
+      dayR: { x: sx + A + gap * 2 + V.day, y: sy, w: A, h: 28 },
+      timeL: { x: sx + A * 2 + gap * 2 + V.day + 18, y: sy, w: A, h: 28 },
+      time: { x: sx + A * 3 + gap * 3 + V.day + 18, y: sy, w: V.time, h: 28 },
+      timeR: { x: sx + A * 3 + gap * 4 + V.day + V.time + 18, y: sy, w: A, h: 28 },
+      hint: { y: m + 204 },
+      cancel: { x: w / 2 - 126, y: h - m - 58, w: 114, h: 40 },
+      ok: { x: w / 2 + 12, y: h - m - 58, w: 114, h: 40 },
+    };
+    const place = (el, b) => Object.assign(el.style, { left: `${b.x}px`, top: `${b.y}px`, width: `${b.w}px`, height: `${b.h}px` });
+    for (const id of ['remind', 'dayL', 'dayR', 'timeL', 'timeR', 'cancel', 'ok']) place($(id), box[id]);
+    for (const [key, id] of Object.entries(INPUTS)) place($(id), box[key]);
+    $('dayIn').style.padding = $('timeIn').style.padding = '0 4px';
+    draw();
+  }
+
+  const K = v => Math.round(v * k);
+  function arrow(L, right, b, hov, off) {
+    const s = Math.max(1, Math.round(2 * k)), w = 12 * s, h = 11 * s;
+    const x = K(b.x + b.w / 2) - w / 2, y = K(b.y + b.h / 2) - h / 2 + (hov && !off ? -Math.round(k) : 0);
+    g.globalAlpha = off ? 0.35 : 1;
+    if (L.cursors) g.drawImage(L.cursors, (right ? 365 : 352) - L.cx, 495 - L.cy, 12, 11, Math.round(x), Math.round(y), w, h);
+    g.globalAlpha = 1;
+  }
+  function field(b, focus, bad) {
+    const x = K(b.x), y = K(b.y), w = K(b.w), h = K(b.h), t = Math.max(1, Math.round(2 * k));
+    g.fillStyle = bad ? RED : EDGE; g.fillRect(x, y, w, h);
+    g.fillStyle = PAPER; g.fillRect(x + t, y + t, w - 2 * t, h - 2 * t);
+    g.fillStyle = '#ecd6aa'; g.fillRect(x + t, y + t, w - 2 * t, t); g.fillRect(x + t, y + t, t, h - 2 * t);
+    if (focus) { g.strokeStyle = 'rgba(242,193,78,0.85)'; g.lineWidth = t; g.strokeRect(x - t / 2, y - t / 2, w + t, h + t); }
+  }
+  // What an input holds, lettered in the game's font, with its caret and selection.
+  // align: 'left' (scrolls to keep the caret in view) or 'center' (short values).
+  function typed(key, px, o) {
+    const b = box[key], el = $(INPUTS[key]), focus = state.focus === key, v = el.value;
+    const inset = o.inset, iw = K(b.w - 2 * inset), my = K(b.y + b.h / 2);
+    g.save(); g.beginPath(); g.rect(K(b.x + 3), K(b.y), K(b.w - 6), K(b.h)); g.clip();
+    const wTo = n => (n ? UI.textW(g, v.slice(0, n), px, k) : 0);
+    const full = wTo(v.length);
+    let x0 = o.align === 'center' ? K(b.x + b.w / 2) - Math.round(Math.min(full, iw) / 2) : K(b.x + inset);
+    const a = Math.min(el.selectionStart || 0, v.length), c = Math.min(el.selectionEnd || 0, v.length);
+    const caretX = wTo(focus ? (el.selectionDirection === 'backward' ? a : c) : v.length);
+    const shift = Math.max(0, caretX - iw);
+    x0 -= shift;
+    if (!v && o.placeholder) UI.say(g, o.placeholder, x0 + (focus ? K(6) : 0), my, px, k, { color: PH, align: o.align === 'center' ? 'center' : 'left' });
+    if (a !== c && focus) { g.fillStyle = 'rgba(242,193,78,0.55)'; g.fillRect(x0 + wTo(a), my - K(11), wTo(c) - wTo(a), K(22)); }
+    if (v) UI.say(g, v, x0, my, px, k, { color: o.color });
+    if (focus && state.blink && a === c) {
+      const cx = o.align === 'center' && !v ? K(b.x + b.w / 2) : x0 + caretX + Math.round(k);
+      g.fillStyle = UI.INK; g.fillRect(cx, my - K(o.caret), Math.max(1, Math.round(2 * k)), K(o.caret * 2));
+    }
+    g.restore();
+  }
+
+  function draw() {
+    if (!box.paper) return;
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, W, H);
+    g.imageSmoothingEnabled = false;
+    g.textBaseline = 'middle';
+    const L = UI.look(images, CUR);
+    const s = Math.max(1, Math.round(2 * k));          // one game texel
+    // the wood: the special-orders board's frame, stretched round the window
+    if (images.orders) {
+      const img = images.orders, c = 12, C = c * s, sw = 338, sh = 198;
+      const cols = [[0, c, 0, C], [c, sw - 2 * c, C, W - 2 * C], [sw - c, c, W - C, C]];
+      const rows = [[0, c, 0, C], [c, sh - 2 * c, C, H - 2 * C], [sh - c, c, H - C, C]];
+      for (const [sx, sW, dx, dW] of cols) for (const [sy, sH, dy, dH] of rows) g.drawImage(img, sx, sy, sW, sH, dx, dy, dW, dH);
+    } else { g.fillStyle = '#7a4422'; g.fillRect(0, 0, W, H); }
+    // the note
+    const p = box.paper;
+    if (L.paper) UI.paperBox(g, L, K(p.x), K(p.y), K(p.w), K(p.h), Math.max(1, Math.round(k)));
+    else { g.fillStyle = '#fbe7c0'; g.fillRect(K(p.x), K(p.y), K(p.w), K(p.h)); }
+    const cx = W / 2;
+    UI.say(g, tr('添加待办'), cx, K(box.title.y), 16, k, { align: 'center' });
+    g.fillStyle = LINE; g.fillRect(K(box.text.x), K(box.title.y + 15), K(box.text.w), Math.max(1, Math.round(k)));
+
+    // what to do
+    field(box.text, state.focus === 'text');
+    typed('text', 14, { inset: 12, align: 'left', placeholder: tr('比如：回复邮件'), caret: 10 });
+
+    // 到点提醒: the game's checkbox
+    const r = box.remind;
+    if (L.check) UI.checkbox(g, L, state.remind, K(r.x), K(r.y + r.h / 2) - Math.round(4.5 * s), s);
+    UI.say(g, tr('到点提醒'), K(r.x) + 9 * s + K(8), K(r.y + r.h / 2), 13, k, { color: state.hover === 'remind' ? UI.GOLD : UI.INK });
+
+    // when: ◀ 今天 ▶   ◀ 14:00 ▶  (the options menu's arrows; the boxes take typing too)
+    const off = !state.remind;
+    for (const [id, right] of [['dayL', 0], ['dayR', 1], ['timeL', 0], ['timeR', 1]]) arrow(L, right, box[id], state.hover === id, off || (id === 'dayL' && state.day === 0));
+    for (const key of ['day', 'time']) {
+      const editing = state.focus === key;
+      g.globalAlpha = off && !editing ? 0.45 : 1;
+      field(box[key], editing, state.bad === key);
+      if (editing) typed(key, 13, { inset: 4, align: 'center', caret: 9 });
+      else {
+        const bb = box[key];
+        UI.say(g, key === 'day' ? dayLabel() : timeLabel(), K(bb.x + bb.w / 2), K(bb.y + bb.h / 2), 13, k, { align: 'center', maxW: K(bb.w - 8), color: past() ? RED : UI.INK });
+      }
+      g.globalAlpha = 1;
+    }
+
+    let hint = [tr('回车添加 · Esc 取消'), UI.DIM];
+    if (state.bad === 'day') hint = [tr('没看懂这个日期，试试 10/25、10月25日 或 明天'), RED];
+    else if (state.bad === 'time') hint = [tr('没看懂这个时间，试试 14:30、1430 或 下午3点'), RED];
+    else if (state.focus === 'day') hint = [tr('直接输入日期，比如 10/25、10月25日、明天、周五'), UI.DIM];
+    else if (state.focus === 'time') hint = [tr('直接输入时间，比如 14:30、1430、下午3点半'), UI.DIM];
+    else if (past()) hint = [tr('这个时间已经过去了'), RED];
+    UI.say(g, hint[0], cx, K(box.hint.y), 11, k, { align: 'center', color: hint[1], maxW: K(box.text.w + 20) });
+
+    // the buttons: the game's cream text box
+    for (const [id, label, color] of [['cancel', tr('取消'), UI.INK], ['ok', tr('添加'), UI.GOLD]]) {
+      const bb = box[id], hov = state.hover === id, up = hov ? -Math.round(k) : 0;
+      if (L.box) UI.nine(g, L, K(bb.x), K(bb.y) + up, K(bb.w), K(bb.h), s);
+      else { g.fillStyle = '#f7e2b5'; g.fillRect(K(bb.x), K(bb.y), K(bb.w), K(bb.h)); }
+      if (hov) { g.fillStyle = 'rgba(242,193,78,0.2)'; g.fillRect(K(bb.x) + 3 * s, K(bb.y) + 3 * s + up, K(bb.w) - 6 * s, K(bb.h) - 6 * s); }
+      UI.say(g, label, K(bb.x + bb.w / 2), K(bb.y + bb.h / 2) + up, 14, k, { align: 'center', color });
+    }
+  }
+
+  function setRemind(on) { state.remind = on; draw(); }
+  function step(what, dir) {
+    commitEdit(true);
+    if (!state.remind) state.remind = true;
+    state.bad = null;
+    if (what === 'day') state.day = Math.max(0, Math.min(MAX_DAYS, state.day + dir));
+    else {
+      // to the next quarter hour that way (a typed 14:07 steps to 14:15 / 14:00)
+      const q = state.min % 15;
+      state.min = q ? (dir > 0 ? state.min - q + 15 : state.min - q) : state.min + dir * 15;
+      if (state.min < 0) { if (state.day > 0) { state.day--; state.min += 1440; } else state.min = 0; }
+      if (state.min >= 1440) { state.day++; state.min -= 1440; }
+    }
+    draw();
+  }
+
+  // ---------- typing a date or a time ----------
+  // Focusing a box shows what it holds, selected, so typing replaces it; Enter / Tab /
+  // clicking away reads it. Something unreadable keeps the old value and says so.
+  const editVal = key => (key === 'day' ? (state.day <= 2 ? dayLabel() : (() => { const d = startOfDay(state.day); return `${d.getMonth() + 1}/${d.getDate()}`; })()) : timeLabel());
+  function beginEdit(key) {
+    const el = $(INPUTS[key]);
+    el.value = editVal(key);
+    state.focus = key; state.bad = null;
+    try { el.select(); } catch { /* fine */ }
+    selectOnUp = el;          // the click that focused it shouldn't drop the selection on mouse-up
+    draw();
+  }
+  let selectOnUp = null;
+  // Read the box being edited. quiet: leave silently (a value not understood is dropped).
+  function commitEdit(quiet) {
+    const key = state.focus;
+    if (key !== 'day' && key !== 'time') return true;
+    const el = $(INPUTS[key]), raw = el.value;
+    if (!raw.trim() || raw === editVal(key)) return true;
+    const v = key === 'day' ? parseDay(raw) : parseTime(raw);
+    if (v == null) {
+      if (!quiet) { state.bad = key; el.focus(); try { el.select(); } catch { /* fine */ } draw(); }
+      return false;
+    }
+    if (key === 'day') state.day = v; else state.min = v;
+    state.remind = true; state.bad = null;
+    el.value = editVal(key);
+    return true;
+  }
+
+  function submit() {
+    if (state.sent) return;
+    if (!commitEdit(false)) return;
+    const text = $('text').value.trim().slice(0, 40);
+    if (!text) { $('text').focus(); return; }
+    if (past()) { draw(); return; }
+    state.sent = true;
+    post({ type: 'todoAdd', text, at: state.remind ? atMs() : null });
+  }
+  const cancel = () => { if (!state.sent) { state.sent = true; post({ type: 'todoCancel' }); } };
+
+  // pressing an arrow steps once, holding it keeps stepping
+  let hold = null;
+  const stopHold = () => { clearTimeout(hold); hold = null; };
+  for (const [id, what, dir] of [['dayL', 'day', -1], ['dayR', 'day', 1], ['timeL', 'time', -1], ['timeR', 'time', 1]]) {
+    $(id).addEventListener('mousedown', e => {
+      e.preventDefault(); step(what, dir);
+      const again = d => { hold = setTimeout(() => { step(what, dir); again(Math.max(40, d * 0.8)); }, d); };
+      again(380);
+    });
+  }
+  window.addEventListener('mouseup', stopHold);
+  window.addEventListener('blur', stopHold);
+  // rolling the wheel over a value steps it too
+  window.addEventListener('wheel', e => {
+    const x = e.clientX, y = e.clientY;
+    for (const what of ['day', 'time']) {
+      const b = box[what];
+      if (x >= b.x - 30 && x <= b.x + b.w + 30 && y >= b.y - 4 && y <= b.y + b.h + 4) { e.preventDefault(); step(what, e.deltaY > 0 ? -1 : 1); return; }
+    }
+  }, { passive: false });
+  $('remind').addEventListener('mousedown', e => { e.preventDefault(); setRemind(!state.remind); });
+  $('ok').addEventListener('mousedown', e => { e.preventDefault(); });
+  $('cancel').addEventListener('mousedown', e => { e.preventDefault(); });
+  $('ok').addEventListener('click', submit);
+  $('cancel').addEventListener('click', cancel);
+  for (const id of ['remind', 'ok', 'cancel', 'dayL', 'dayR', 'timeL', 'timeR']) {
+    $(id).addEventListener('mouseenter', () => { state.hover = id; draw(); });
+    $(id).addEventListener('mouseleave', () => { if (state.hover === id) { state.hover = null; draw(); } stopHold(); });
+  }
+  // the typing: redraw on every change; the caret blinks
+  const redraw = () => { state.blink = true; draw(); };
+  for (const [key, id] of Object.entries(INPUTS)) {
+    const el = $(id);
+    for (const ev of ['input', 'keyup', 'select', 'mouseup', 'compositionupdate', 'compositionend']) el.addEventListener(ev, redraw);
+    el.addEventListener('input', () => { if (state.bad === key) state.bad = null; });
+    el.addEventListener('mouseup', e => { if (selectOnUp === el) { e.preventDefault(); selectOnUp = null; } });
+    el.addEventListener('keydown', () => { if (selectOnUp === el) selectOnUp = null; });
+    el.addEventListener('focus', () => { if (key === 'text') { state.focus = key; redraw(); } else beginEdit(key); });
+    el.addEventListener('blur', () => {
+      if (state.focus !== key) return;
+      if (key !== 'text') { commitEdit(true); if (state.bad === key) state.bad = null; }
+      state.focus = null; draw();
+    });
+    el.addEventListener('keydown', e => {
+      if (key === 'text' || e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); if (commitEdit(false)) { draw(); el.select(); } }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); state.bad = null; el.value = editVal(key); el.select(); draw(); }
+      else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); state.focus = null; step(key, e.key === 'ArrowUp' ? 1 : -1); beginEdit(key); }
+      else if (e.key === 'Tab' && !commitEdit(false)) e.preventDefault();
+    });
+  }
+  document.addEventListener('selectionchange', redraw);
+  setInterval(() => { if (state.focus) { state.blink = !state.blink; draw(); } }, 530);
+  document.addEventListener('mousedown', e => { if (e.target === document.body || e.target === cv) { e.preventDefault(); $('text').focus(); } });
+
+  window.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    else if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); submit(); }
+  });
+  window.addEventListener('resize', layout);
+
+  // from the app: the language, and when a reminder would be by default
+  window.SDV_TODO = {
+    init(o) {
+      o = o || {};
+      if (o.lang && window.SDV_I18N) { SDV_I18N.set(o.lang); document.documentElement.lang = o.lang === 'en' ? 'en' : 'zh-CN'; }
+      document.title = tr('添加待办');
+      setAt(o.at || nextQuarter());
+      state.sent = false; state.remind = false; state.bad = null;
+      $('text').value = '';
+      layout();
+      $('text').focus();
+    },
+    // for checking the readers
+    parseDay, parseTime,
+  };
+  Promise.all(['cursors', 'orders'].map(loadImg)).then(() => {
+    window.SDV_TODO.init({ lang: window.SDV_I18N ? SDV_I18N.resolve('auto', navigator.language) : 'zh' });
+    // the game's font may still be loading: draw again once it is
+    let tries = 0;
+    const again = () => { if (UI.ready()) draw(); else if (tries++ < 200) setTimeout(again, 50); };
+    again();
+    post({ type: 'hello' });
+  });
+})();
+</script>
+</body>
+</html>

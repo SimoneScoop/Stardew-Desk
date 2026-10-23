@@ -6,6 +6,7 @@
 window.SDV = window.SDV || {};
 SDV.decor = (() => {
   'use strict';
+  const tr = (...a) => (window.SDV_I18N ? SDV_I18N.L(...a) : a[0]);
 
   let TILE = 16, cfg = null;
   let trees = [], debris = [], fields = [], objects = [], grass = [];
@@ -67,15 +68,21 @@ SDV.decor = (() => {
     // start clean: init runs again whenever something is moved
     trees = []; debris = []; grass = []; blocked.clear(); occupied.clear();
     const d = config.decor || {};
-    // {fields: {i: [dx, dy]}, trees: {id: [x, y]}, removed: [i], added: [{x, y, w, h, kind}]}
+    // {fields: {i: [dx, dy]}, trees: {id: [x, y]}, removed: [i], added: [{x, y, w, h, kind}],
+    //  treesRemoved: [id], objectsRemoved: [id]}
     const moves = config.decorMoves || {};
     const fieldMoves = moves.fields || {}, treeMoves = moves.trees || {}, objectMoves = moves.objects || {};
     const removed = new Set((moves.removed || []).map(Number));
+    const treeGone = new Set(moves.treesRemoved || []);        // trees and props the user took off the farm
+    const objectGone = new Set((moves.objectsRemoved || []).map(Number));
     const cleared = d.clearedZone || { x: 0, y: 0, w: 0, h: 0 };
     // one small RNG per spot, so moving something never reshuffles the rest of the farm
     const spotRand = (x, y, salt) => rng(((d.seed || 7) * 2654435761 + key(x, y) * 40503 + (salt || 0)) >>> 0);
 
     // tiles already used by buildings and props
+    for (const p of config.extraProps || []) {        // other buildings: their whole footprint
+      for (let y = p.fp.y; y < p.fp.y + p.fp.h; y++) for (let x = p.fp.x; x < p.fp.x + p.fp.w; x++) blocked.add(key(x, y));
+    }
     for (const p of Object.values(config.props)) {
       const [, , sw, sh] = p.src;
       const x0 = Math.floor(p.x / TILE), x1 = Math.ceil((p.x + sw) / TILE);
@@ -105,15 +112,23 @@ SDV.decor = (() => {
       if (objectMoves[id]) return { ...o, id, owner: -1, x: objectMoves[id][0], y: objectMoves[id][1] };
       const i = owner(o), m = i >= 0 ? (fieldMoves[i] || [0, 0]) : [0, 0];
       return { ...o, id, owner: i, x: o.x + m[0], y: o.y + m[1], gone: i >= 0 && removed.has(i) };
-    }).filter(o => o.type !== 'sprinkler' && !o.gone && !underBuilding.has(key(o.x, o.y)));   // a deleted field takes its scarecrow along; objects under a building are hidden
+    }).filter(o => o.type !== 'sprinkler' && !o.gone && !objectGone.has(o.id) && !underBuilding.has(key(o.x, o.y)));   // a deleted field takes its scarecrow along; objects under a building are hidden
     for (const o of objects) { blocked.add(key(o.x, o.y)); occupied.add(key(o.x, o.y)); }
     placeFocusPlot(config, moves.focus, underBuilding, map);
     waterAndGuardFields(underBuilding, map);
+    // keep a little open ground round the other buildings (and round all of them on a farm
+    // imported from a save, which can stand out among the trees), so no tree hides a door;
+    // only trees, weeds and grass give way
+    const L = SDV.layout.offsets();
+    for (const f of SDV.layout.footprints(L)) {
+      if (!L.from && !/^x/.test(f.id)) continue;
+      for (let y = f.y - 1; y <= f.y + f.h + 2; y++) for (let x = f.x - 2; x <= f.x + f.w + 1; x++) blocked.add(key(x, y));
+    }
 
-    const buildingsLayer = map.layers.find(l => l.id === 'Buildings');
-    const solid = (x, y) => Boolean(buildingsLayer && buildingsLayer.tiles[y] && buildingsLayer.tiles[y][x]);
+    const buildingsLayers = map.layers.filter(l => l.id === 'Buildings' || l.id === 'Buildings2');
+    const solid = (x, y) => buildingsLayers.some(l => l.tiles[y] && l.tiles[y][x]) || SDV.layout.isWater(x, y);
     const placeTree = (id, x, y, kind, flip) => {
-      if (blocked.has(key(x, y)) || solid(x, y)) return false;
+      if (treeGone.has(id) || blocked.has(key(x, y)) || solid(x, y)) return false;
       trees.push({ id, x, y, kind, flip });
       blocked.add(key(x, y));
       return true;
@@ -162,10 +177,10 @@ SDV.decor = (() => {
   // A 3×3 bed for the focus timer (a quality sprinkler in the middle, eight crops round
   // it). It sits where the user dragged it, or on the nearest free spot to the shipping bin.
   function placeFocusPlot(config, at, underBuilding, map) {
-    const buildingsLayer = map.layers.find(l => l.id === 'Buildings');
-    const solid = (x, y) => Boolean(buildingsLayer && buildingsLayer.tiles[y] && buildingsLayer.tiles[y][x]);
+    const buildingsLayers = map.layers.filter(l => l.id === 'Buildings' || l.id === 'Buildings2');
+    const solid = (x, y) => buildingsLayers.some(l => l.tiles[y] && l.tiles[y][x]) || SDV.layout.isWater(x, y);
     const W = map.layers[0].w, H = map.layers[0].h;
-    const sprite = (x, y) => Object.values(config.props).some(p => x * TILE + 16 > p.x && x * TILE < p.x + p.src[2] && y * TILE + 16 > p.y && y * TILE < p.y + p.src[3]);
+    const sprite = (x, y) => Object.values(config.props).concat(config.extraProps || []).some(p => x * TILE + 16 > p.x && x * TILE < p.x + p.src[2] && y * TILE + 16 > p.y && y * TILE < p.y + p.src[3]);
     const pen = (x, y) => Object.values(config.pens || {}).some(p => x * TILE + 16 > p.x && x * TILE < p.x + p.w && y * TILE + 16 > p.y && y * TILE < p.y + p.h);
     let spot = at;
     if (!spot) {
@@ -211,8 +226,8 @@ SDV.decor = (() => {
   // needs the fewest pieces (quality on a tie), then make sure a scarecrow reaches every
   // crop; fields nobody guards get one of their own next to them.
   function waterAndGuardFields(underBuilding, map) {
-    const buildingsLayer = map.layers.find(l => l.id === 'Buildings');
-    const solid = (x, y) => Boolean(buildingsLayer && buildingsLayer.tiles[y] && buildingsLayer.tiles[y][x]);
+    const buildingsLayers = map.layers.filter(l => l.id === 'Buildings' || l.id === 'Buildings2');
+    const solid = (x, y) => buildingsLayers.some(l => l.tiles[y] && l.tiles[y][x]) || SDV.layout.isWater(x, y);
     const free = (x, y) => !occupied.has(key(x, y)) && !underBuilding.has(key(x, y)) && !solid(x, y);
     for (const f of fields) {
       let best = null;
@@ -276,7 +291,7 @@ SDV.decor = (() => {
     return best;
   }
   const OBJ_ZH = { scarecrow: '稻草人', sprinkler: '洒水器', quality: '优质洒水器', iridium: '铱制洒水器', sign: '木牌', beehouse: '蜂房', keg: '小桶', jar: '罐头瓶', chest: '箱子' };
-  const objectName = t => OBJ_ZH[t] || '物件';
+  const objectName = t => tr(OBJ_ZH[t] || '物件');
   const treeList = () => trees.map(t => ({ id: t.id, x: t.x, y: t.y }));
 
   // Tile keys covered by tree canopies, so the cursor can shake leaves loose.
@@ -455,9 +470,9 @@ SDV.decor = (() => {
       const crop = CROPS[name];
       if (!crop || !crop.seasons.includes(season)) continue;
       const st = cropState(f, name, date, season);
-      parts.push(`${CROP_ZH[name]}${!st ? '待播种' : st.regrowing ? '再生中' : st.ripe ? '成熟' : st.phase === 0 ? '刚播种' : ` ${st.phase}/${crop.days.length}`}`);
+      parts.push(tr('{0}{1}', tr(CROP_ZH[name]), !st ? tr('待播种') : st.regrowing ? tr('再生中') : st.ripe ? tr('成熟') : st.phase === 0 ? tr('刚播种') : ` ${st.phase}/${crop.days.length}`));
     }
-    return parts.join('，');
+    return parts.join(tr('，'));
   }
 
   const isBlocked = (x, y) => blocked.has(key(x, y));

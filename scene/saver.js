@@ -93,7 +93,7 @@ SDV.saver = (() => {
     ctx.textBaseline = 'middle';
     ctx.font = `600 ${Math.round(7.2 * k)}px -apple-system, "PingFang SC", sans-serif`;
     const cx = ox + 47 * k;
-    ctx.fillText(`${WEEK[date.getDay()]}. ${date.getDate()}`, cx, oy + 8.5 * k);
+    ctx.fillText(`${window.SDV_I18N && SDV_I18N.get() === 'en' ? ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][date.getDay()] : WEEK[date.getDay()]}. ${date.getDate()}`, cx, oy + 8.5 * k);
     const h = date.getHours(), m = date.getMinutes();
     const h12 = ((h + 11) % 12) + 1;
     ctx.fillText(`${h12}:${String(m).padStart(2, '0')} ${h < 12 ? 'am' : 'pm'}`, cx, oy + 35.5 * k);
