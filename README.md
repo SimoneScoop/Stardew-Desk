@@ -90,6 +90,20 @@ It ships no game assets: on first launch it reads them from your own copy of the
 - **Windows 版刚发布，测试过的机器还不多。** 如果桌面上看不到农场或者是黑的，先试 叶子菜单 → 更多 → 桌面显示方式 →「兼容模式」；
   还不行的话欢迎在 [Issues](../../issues) 里附上日志反馈。
 
+## Windows 存档与独立自定义模式（实验性）
+
+新增的 [win-saves/](win-saves/README.md) 提供两个独立启动入口：只读读取自己的农场存档，或从本机导出的素材包启动自由布置场景。包括快捷方式箱子、村民互动与桌面好感系统，并沿用原版的配乐、专注、公告板和屏保工具。
+
+```powershell
+cd win-saves
+npm ci
+npm run start:save
+# 已准备独立素材包后：
+npm run start:custom -- --asset-pack="C:/path/to/standalone-pack"
+```
+
+素材包不随仓库分发；生成方法与功能边界见该目录的说明。原有 `mac/`、`win/` 和 `scene/` 启动方式保持不变。
+
 ## 使用
 
 农场铺在系统壁纸之上、桌面图标之下，系统壁纸本身不会被改动。🍃 是控制菜单（Mac 在菜单栏右上角，Windows 在任务栏右下角）：

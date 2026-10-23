@@ -1,0 +1,70 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Stardew Desk audio</title>
+<script src="adpcm.js"></script>
+</head>
+<body>
+<script>
+/* Hidden player window: the game's ADPCM tracks are decoded here (browsers can't play
+ * ADPCM WAVs) and played through Web Audio, one music track at a time plus short effects.
+ *   app → audio:music {name, bytes, volume, fadeIn}   start a track
+ *   app → audio:volume {volume, seconds}              fade the music to a volume (0 = out)
+ *   app → audio:stop                                  stop the music now
+ *   app → audio:sfx {name, bytes?, volume}            play an effect (bytes only the first time)
+ *   audio → app: audio:ended {name} | audio:error {name, message} */
+'use strict';
+let ctx = null;
+function context() { if (!ctx) ctx = new AudioContext(); if (ctx.state === 'suspended') ctx.resume(); return ctx; }
+function toBuffer(bytes) {
+  const d = SDV_ADPCM.decodeWav(bytes);
+  const c = context();
+  const buf = c.createBuffer(d.channels, d.data[0].length, d.rate);
+  d.data.forEach((ch, i) => buf.copyToChannel(ch, i));
+  return buf;
+}
+let music = null;               // {src, gain, name}
+SDV_APP.on('audio:music', m => {
+  try {
+    const c = context();
+    if (music) { try { music.src.onended = null; music.src.stop(); } catch { /* already stopped */ } music = null; }
+    const buf = toBuffer(m.bytes);
+    const src = c.createBufferSource(), gain = c.createGain();
+    src.buffer = buf;
+    src.connect(gain).connect(c.destination);
+    gain.gain.setValueAtTime(0, c.currentTime);
+    gain.gain.linearRampToValueAtTime(m.volume, c.currentTime + (m.fadeIn || 3));
+    src.onended = () => { if (music && music.src === src) { music = null; SDV_APP.send('audio:ended', { name: m.name }); } };
+    src.start();
+    music = { src, gain, name: m.name };
+  } catch (e) { SDV_APP.send('audio:error', { name: m.name, message: String(e && e.message || e) }); }
+});
+SDV_APP.on('audio:volume', v => {
+  if (!music) return;
+  const c = context(), g = music.gain.gain;
+  g.cancelScheduledValues(c.currentTime);
+  g.setValueAtTime(g.value, c.currentTime);
+  g.linearRampToValueAtTime(v.volume, c.currentTime + (v.seconds || 0.3));
+});
+SDV_APP.on('audio:stop', () => {
+  if (!music) return;
+  try { music.src.onended = null; music.src.stop(); } catch { /* fine */ }
+  music = null;
+});
+const effects = {};
+SDV_APP.on('audio:sfx', s => {
+  try {
+    if (s.bytes) effects[s.name] = toBuffer(s.bytes);
+    const buf = effects[s.name];
+    if (!buf) return;
+    const c = context(), src = c.createBufferSource(), gain = c.createGain();
+    src.buffer = buf;
+    gain.gain.value = s.volume;
+    src.connect(gain).connect(c.destination);
+    src.start();
+  } catch (e) { SDV_APP.send('audio:error', { name: s.name, message: String(e && e.message || e) }); }
+});
+</script>
+</body>
+</html>

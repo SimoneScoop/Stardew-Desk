@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stardew Desk · M2</title>
+<style>
+  :root {
+    --panel: rgba(54, 32, 18, 0.88);
+    --panel-edge: #c47a2c;
+    --ink: #fbe7c0;
+    --ink-dim: #d6b98a;
+    --accent: #f2c14e;
+  }
+  html, body { margin: 0; height: 100%; background: #1d1410; overflow: hidden; }
+  canvas#view { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; cursor: default; }
+  canvas#view.picking { cursor: crosshair; }
+  #panel {
+    position: fixed; left: 16px; bottom: 16px; min-width: 248px; max-width: 340px;
+    padding: 12px 14px; border-radius: 6px;
+    background: var(--panel); border: 2px solid var(--panel-edge);
+    color: var(--ink); font: 13px/1.5 -apple-system, "PingFang SC", sans-serif;
+    box-shadow: 0 2px 0 #00000055;
+  }
+  #panel { user-select: none; -webkit-user-select: none; max-height: calc(100vh - 32px); overflow-y: auto; box-sizing: border-box; }
+  #panel.hidden { display: none; }
+  #panel h1 { font-size: 13px; margin: 0 0 8px; color: var(--accent); letter-spacing: .5px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+  .row > span { color: var(--ink-dim); width: 40px; flex: none; }
+  button {
+    font: inherit; color: var(--ink); background: #5b3a22; border: 1px solid #8a5a33;
+    border-radius: 4px; padding: 2px 8px; cursor: pointer;
+  }
+  button[aria-pressed="true"] { background: var(--accent); color: #3a2414; border-color: var(--accent); }
+  #pets { display: flex; flex-wrap: wrap; gap: 3px; flex: 1; }
+  button.pet { padding: 0; width: 30px; height: 30px; display: grid; place-items: center; font-size: 11px; }
+  button.pet canvas { width: 28px; height: 28px; image-rendering: pixelated; }
+  input[type=range] { flex: 1; min-width: 120px; accent-color: var(--accent); }
+  #info { color: var(--ink-dim); font-size: 12px; margin-top: 8px; white-space: pre-line; }
+  .tabs { display: flex; gap: 4px; margin: 0 0 8px; border-bottom: 1px solid #8a5a33; }
+  .tabs button { border-radius: 4px 4px 0 0; border-bottom: none; padding: 2px 12px; margin-bottom: -1px; }
+  .tabs button[aria-pressed="true"] { background: var(--accent); color: #3a2414; }
+  .pane { display: none; }
+  .pane.on { display: block; }
+  /* bulletin board */
+  #board-panel { display: none; margin: 0 0 4px; }
+  #board-panel.on { display: block; }
+  #board-panel .sub { color: var(--accent); font-weight: 600; margin: 6px 0 2px; }
+  #board-panel .sub:first-child { margin-top: 0; }
+  #board-panel input[type=text], #board-panel input[type=number], #board-panel input[type=time] {
+    font: inherit; color: var(--ink); background: #2a190d; border: 1px solid #8a5a33; border-radius: 4px; padding: 1px 6px; }
+  #board-panel input[type=text] { flex: 1; min-width: 0; user-select: text; -webkit-user-select: text; }
+  #board-panel input[type=number] { width: 72px; }
+  #board-panel input[type=time] { width: 92px; }
+  #board-panel .hint { margin: -2px 0 4px; }
+  #board-panel input[type=checkbox] { accent-color: var(--accent); }
+  #board-panel label { display: inline-flex; gap: 4px; align-items: center; }
+  #todo-list { list-style: none; margin: 4px 0; padding: 0; max-height: 168px; overflow-y: auto; }
+  #todo-list li { display: flex; gap: 6px; align-items: center; padding: 1px 0; }
+  #todo-list li span { flex: 1; overflow-wrap: anywhere; }
+  #todo-list li.done span { color: var(--ink-dim); text-decoration: line-through; }
+  #todo-list li.empty { color: var(--ink-dim); }
+  #todo-list .del { padding: 0 6px; line-height: 1.3; }
+  #pay-fields.off { opacity: .45; pointer-events: none; }
+  #pay-days button { padding: 0 6px; }
+  .hint { color: var(--ink-dim); font-size: 12px; }
+  #missing {
+    position: fixed; inset: 0; display: none; place-items: center; text-align: center;
+    color: var(--ink); font: 15px/1.7 -apple-system, "PingFang SC", sans-serif; padding: 24px;
+  }
+  #missing code { color: var(--accent); }
+</style>
+<style>@font-face{font-family:StardewGame;src:url("sdv://app/game-font.ttf") format("truetype");font-weight:100 900}*{font-family:StardewGame!important;font-synthesis:none}</style></head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="panel">
+  <h1>星露谷桌面</h1>
+  <div class="tabs"><button data-tab="scene">场景</button><button data-tab="layout">布置</button><button data-tab="board">公告板</button></div>
+  <div class="pane" data-pane="scene">
+    <div class="row"><span>季节</span>
+      <button data-season="auto">自动</button>
+      <button data-season="spring">春</button>
+      <button data-season="summer">夏</button>
+      <button data-season="fall">秋</button>
+      <button data-season="winter">冬</button>
+    </div>
+    <div class="row"><span>时间</span>
+      <button id="time-live">实时</button>
+      <input id="time" type="range" min="0" max="23.99" step="0.25" aria-label="模拟时间">
+    </div>
+    <div class="row"><span>天气</span>
+      <button data-weather="live">实时</button>
+      <button data-weather="sunny">晴</button>
+      <button data-weather="cloudy">阴</button>
+      <button data-weather="rain">雨</button>
+      <button data-weather="storm">雷雨</button>
+      <button data-weather="snow">雪</button>
+      <button data-weather="fog">雾</button>
+      <button data-weather="windy">风</button>
+    </div>
+    <div class="row"><span>宠物</span>
+      <div id="pets"></div>
+    </div>
+    <div class="row"><span>视图</span>
+      <button data-view="frame">构图</button>
+      <button data-view="full">全图</button>
+      <button id="grid">网格</button>
+    </div>
+  </div>
+  <div class="pane" data-pane="layout">
+    <div class="row"><span>布置</span>
+      <button id="layout-edit">调整布局</button>
+      <button id="field-add">新增作物田</button>
+      <button id="layout-reset">恢复默认</button>
+    </div>
+    <div class="row"><span>画</span>
+      <button data-tool="path">石板路</button>
+      <button data-tool="fence">围栏</button>
+      <button data-tool="lamp">路灯</button>
+      <button data-tool="erase">橡皮</button>
+      <button id="paths-auto" title="路、围栏、路灯跟着建筑自动生成">自动</button>
+    </div>
+    <div class="hint">打开「调整布局」后直接在地图上拖：建筑、田、树、小物件、信箱、出货箱、公告板都能挪。</div>
+  </div>
+  <div class="pane" data-pane="board">
+    <div id="board-panel" class="on">
+      <div class="sub">今日待办</div>
+      <div class="row"><input id="todo-text" type="text" maxlength="40" placeholder="今天要做的事，回车添加"><button id="todo-add">添加</button></div>
+      <ul id="todo-list"></ul>
+      <div class="row"><button id="todo-clear" hidden>清掉已完成的</button></div>
+      <div class="sub"><label><input id="pay-on" type="checkbox"> 下班倒计时</label></div>
+      <div id="pay-fields">
+        <div class="row"><label>上班 <input id="pay-start" type="time"></label><label>下班 <input id="pay-end" type="time"></label></div>
+        <div class="row"><label>日薪 <input id="pay-daily" type="number" min="0" step="1" placeholder="可不填"> 元</label></div>
+        <div class="hint">填了日薪会显示「今日已挣」，按上下班时间平均算</div>
+        <div class="row"><label><input id="pay-lunch" type="checkbox"> 午休不算钱</label><input id="pay-ls" type="time"> – <input id="pay-le" type="time"></div>
+        <div class="row" id="pay-days">工作日
+          <button data-day="1">一</button><button data-day="2">二</button><button data-day="3">三</button><button data-day="4">四</button><button data-day="5">五</button><button data-day="6">六</button><button data-day="0">日</button>
+        </div>
+        <div class="row"><label><input id="board-money" type="checkbox"> 显示已挣金额</label></div>
+        <div class="hint">录屏、截图前可以先关掉</div>
+        <div class="row"><label><input id="board-remind" type="checkbox"> 下班时发通知</label></div>
+        <div id="pay-preview" class="hint"></div>
+      </div>
+      <div class="row"><label><input id="board-sound" type="checkbox"> 音效</label></div>
+      <div class="hint">打勾时游戏里的「叮」，下班时的收获声</div>
+      <div class="row"><label><input id="board-show" type="checkbox"> 在农场里放公告板</label></div>
+      <div class="hint">鼠标在桌面的公告板上停一下会展开；位置在「调整布局」里拖</div>
+    </div>
+  </div>
+  <div id="info"></div>
+</div>
+
+<div id="missing">
+  <div>还没有读取游戏画面。<br>在叶子菜单 → 更多 →「重新读取游戏画面…」里读取一次。</div>
+</div>
+
+<script src="data/farm.js"></script>
+<script src="config.js"></script>
+<script src="sky.js"></script>
+<script src="weather.js"></script>
+<script src="sprite-frames.js"></script><script src="animals.js"></script>
+<script src="layout.js"></script>
+<script src="decor.js"></script>
+<script src="paths.js"></script>
+<script src="focus.js"></script>
+<script src="board.js"></script>
+<script src="critters.js"></script>
+<script src="villagers.js"></script>
+<script src="interact.js"></script>
+<script src="saver.js"></script>
+<script src="game-font.js"></script>
+<script src="main.js"></script></body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "name": "stardew-desk",
+  "productName": "Stardew Desk",
+  "version": "1.1.1",
+  "description": "把《星露谷物语》的农场铺到 Windows 桌面上（非官方粉丝作品）",
+  "author": "SimoneScoop",
+  "license": "MIT",
+  "main": "main.js",
+  "private": true,
+  "dependencies": {
+    "koffi": "2.9.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SimoneScoop/Stardew-Desk.git"
+  }
+}
