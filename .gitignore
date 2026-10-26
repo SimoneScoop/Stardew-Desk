@@ -1,6 +1,7 @@
 # 游戏素材：只在本机从正版游戏里读取，不要提交
 game-content/
 scene/data/
+docs/local/
 *.xnb
 *.xwb
 *.m4a
