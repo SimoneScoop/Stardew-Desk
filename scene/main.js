@@ -50,6 +50,7 @@
     mailHover: 0,                      // seconds the cursor has rested on the mailbox
     tool: null,                        // layout painting: 'path' | 'fence' | 'lamp' | 'erase'
     painting: null,                    // {kinds: Set, last: 'x,y'} while a paint stroke is on
+    boardDrag: false,                  // dragging the notice's scrollbar
     paintHover: null,                  // tile under the cursor with a paint tool: {x, y, why}   // 'cat0'…'cat5', 'dog0'…'dog5' or 'none'
   };
 
@@ -326,6 +327,12 @@
   }
   // A to-do ticked on the notice: tell the app (desktop, settings window) or keep it (browser).
   SDV.board.onToggle(b => { if (DESKTOP) post({ type: 'board', value: b }); else { if (!HOST) store.set('board', b); notify('board', b); } });
+  SDV.board.onEdit(id => {
+    if (HOST) {
+      const r = SDV.board.rect();
+      post({ type: 'todoEdit', id, rect: r ? { x: r.x / dpr, y: r.y / dpr, w: r.w / dpr, h: r.h / dpr } : null });
+    } else SDV.board.openTodo(id);
+  });
 
   // ---------- frame ----------
   let lastT = performance.now();
@@ -556,6 +563,7 @@
     return { x: cam.x + (e.clientX * dpr) / cam.scale, y: cam.y + (e.clientY * dpr) / cam.scale };
   }
   canvas.addEventListener('mousemove', e => {
+    if (state.boardDrag) { SDV.board.drag(e.clientX * dpr, e.clientY * dpr); return; }
     const p = toMap(e);
     state.hoverTile = { x: Math.floor(p.x / TILE), y: Math.floor(p.y / TILE) };
     if (state.editLayout) {
@@ -583,8 +591,15 @@
     if (state.view === 'frame') SDV.interact.setCursor(p, performance.now() / 1000);
   });
   canvas.addEventListener('mouseleave', () => { state.hoverTile = null; state.cursor = null; SDV.interact.setCursor(null); });
+  canvas.addEventListener('wheel', e => {
+    if (state.editLayout) return;
+    if (SDV.board.wheel(e.deltaX * dpr, e.deltaY * dpr, e.clientX * dpr, e.clientY * dpr)) e.preventDefault();
+  }, { passive: false });
   canvas.addEventListener('mousedown', e => {
-    if (!state.editLayout && SDV.board.click(e.clientX * dpr, e.clientY * dpr)) return;   // a to-do on the open notice
+    if (!state.editLayout) {
+      const hit = SDV.board.down(e.clientX * dpr, e.clientY * dpr);   // a to-do row, +, or the scrollbar
+      if (hit) { if (hit === 'drag') state.boardDrag = true; return; }
+    }
     const p = toMap(e);
     if (state.editLayout) {
       const h = state.hover;
@@ -601,6 +616,7 @@
     state.drag = { a: p, b: p };
   });
   window.addEventListener('mouseup', () => {
+    if (state.boardDrag) { state.boardDrag = false; SDV.board.up(); return; }
     if (state.painting) { endPaint(); return; }
     if (state.moving) { dropItem(); return; }
     if (!state.drag) return;
@@ -1019,6 +1035,11 @@
     visit(id) { return SDV.villagers.visit(id); },
     setTarget(w, h) { state.target = w && h ? { w, h } : null; },
     click(x, y) { SDV.board.click(x * dpr, y * dpr); },
+    down(x, y) { return SDV.board.down(x * dpr, y * dpr); },
+    drag(x, y) { SDV.board.drag(x * dpr, y * dpr); },
+    up() { SDV.board.up(); },
+    wheel(dx, dy, x, y) { return SDV.board.wheel(dx * dpr, dy * dpr, x * dpr, y * dpr); },
+    hold(on) { SDV.board.hold(on); },
     openBoard() { document.getElementById('panel').classList.remove('hidden'); setTab('board'); SDV.board.openPanel(true); },
   };
 

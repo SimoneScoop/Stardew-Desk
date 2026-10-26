@@ -8,7 +8,7 @@
 //   Build:             cd win && npm run dist     (→ dist/Stardew-Desk-win.zip)
 'use strict';
 
-const { app, BrowserWindow, Tray, Menu, ipcMain, screen, powerMonitor, dialog, protocol, net, Notification, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, screen, powerMonitor, dialog, protocol, net, Notification, nativeImage, shell, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
@@ -34,6 +34,7 @@ if (!app.requestSingleInstanceLock()) { app.quit(); return; }
 const SUPPORT = app.getPath('userData');        // %APPDATA%\Stardew Desk
 const sceneDir = path.join(SUPPORT, 'scene');   // code copied from the app + data/ from setup
 const codeDir = app.isPackaged ? path.join(process.resourcesPath, 'scene') : path.join(__dirname, '..', 'scene');
+const R = require(path.join(codeDir, 'todo-reminders.js'));
 const MUSIC_DIR = path.join(SUPPORT, 'music');
 const LOG_PATH = path.join(SUPPORT, 'StardewDesk.log');
 const PRELOAD = path.join(__dirname, 'preload.js');
@@ -217,6 +218,43 @@ function setFps(s, fps) {
   call(s, 'SDV.host.setFps(' + fps + ')');
 }
 
+// ---------- the new-to-do shortcut ----------
+// The board stores the Chrome key event recorded in the settings panel; Electron wants
+// an accelerator string such as "Control+Alt+T".
+const HOTKEY_KEY = {
+  Space: 'Space', Enter: 'Return', Tab: 'Tab', Escape: 'Escape', Backspace: 'Backspace', Delete: 'Delete',
+  Insert: 'Insert', Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown',
+  ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+  Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\', Semicolon: ';',
+  Quote: "'", Comma: ',', Period: '.', Slash: '/', Backquote: '`',
+};
+function hotkeyAccelerator(h) {
+  if (!h || !(h.meta || h.ctrl || h.alt)) return null;
+  const code = h.code || '';
+  let key = HOTKEY_KEY[code];
+  if (!key && /^Key[A-Z]$/.test(code)) key = code.slice(3);
+  if (!key && /^Digit[0-9]$/.test(code)) key = code.slice(5);
+  if (!key && /^F([1-9]|1\d|2[0-4])$/.test(code)) key = code;
+  if (!key && typeof h.key === 'string' && h.key.length === 1) key = h.key.toUpperCase();
+  if (!key) return null;
+  const parts = [];
+  if (h.ctrl) parts.push('Control');
+  if (h.alt) parts.push('Alt');
+  if (h.shift) parts.push('Shift');
+  if (h.meta) parts.push('Super');
+  return parts.concat(key).join('+');
+}
+let todoHotkey = null;
+function applyTodoHotkey() {
+  if (todoHotkey) { try { globalShortcut.unregister(todoHotkey); } catch { /* ignore */ } todoHotkey = null; }
+  const acc = hotkeyAccelerator((S.board || {}).todoHotkey);
+  if (!acc) return;
+  try {
+    if (!globalShortcut.register(acc, () => openTodoForm(null))) log('新建待办快捷键已被占用：' + acc);
+    else { todoHotkey = acc; log('新建待办快捷键：' + acc); }
+  } catch (e) { log('新建待办快捷键注册失败：' + acc + '，' + e); }
+}
+
 // ---------- the settings everything shares ----------
 function applySetting(key, value) {
   if (key === 'season') S.season = value || 'auto';
@@ -225,9 +263,15 @@ function applySetting(key, value) {
   else if (key === 'layout') S.layout = value;
   else if (key === 'pet') S.pet = value || 'cat0';
   else if (key === 'time') timeOverride = value == null ? null : value;
-  else if (key === 'board') { boardTicked(S.board, value); S.board = value; }
+  else if (key === 'board') {
+    const hotkeyBefore = JSON.stringify((S.board || {}).todoHotkey || null);
+    boardTicked(S.board, value);
+    S.board = value;
+    if (JSON.stringify((S.board || {}).todoHotkey || null) !== hotkeyBefore) applyTodoHotkey();
+  }
   else return;
   callAll('SDV.host.apply(' + JSON.stringify(key) + ',' + JSON.stringify(value == null ? null : value) + ')');
+  if (key === 'board') reminderTick();
 }
 function settingsScript() {
   const js = [
@@ -249,6 +293,22 @@ function settingsScript() {
 function pushSettings(s) { call(s, settingsScript()); s.fps = -1; applyPolicy(); }
 
 function onMessage(wc, body) {
+  if (reminderWindow && reminderWindow.wc === wc) {
+    if (body.type === 'hello') { reminderWindow.ready = true; refreshReminder(); }
+    else if (body.type === 'reminderAction') reminderAction(body);
+    return;
+  }
+  if (todoForm && todoForm.wc === wc) {
+    if (body.type === 'hello') {
+      run(wc, 'SDV.todoForm.init(' + JSON.stringify(todoForm.todo) + ')');
+      todoForm.win.show(); todoForm.win.focus();
+    } else if (body.type === 'todoSave') {
+      try { saveTodo(body.id, body.text, body.reminder); closeTodoForm(); }
+      catch (e) { run(wc, 'SDV.todoForm.error(' + JSON.stringify(String(e)) + ')'); }
+    }
+    else if (body.type === 'todoClose') closeTodoForm();
+    return;
+  }
   if (setup && setup.wc === wc) { onSetupMessage(body); return; }
   if (saver) {
     const v = saver.views.find(x => x.wc === wc);
@@ -264,6 +324,7 @@ function onMessage(wc, body) {
       editorCall('SDV.host.setTarget(' + Math.round(d.bounds.width * k) + ',' + Math.round(d.bounds.height * k) + ');' + settingsScript());
       if (boardPanelWanted) { boardPanelWanted = false; editorCall('SDV.host.openBoard()'); }
     } else if (body.type === 'setting') applySetting(body.key, body.value);
+    else if (body.type === 'todoEdit') openTodoForm(body.id, null, body.rect);
     else if (body.type === 'mailRead') markMailRead();
     return;
   }
@@ -286,6 +347,7 @@ function onMessage(wc, body) {
   else if (body.type === 'mailRead') markMailRead();
   else if (body.type === 'boardRect') setCatcher(s, body.rect || null);
   else if (body.type === 'board') setBoard(body.value);
+  else if (body.type === 'todoEdit') openTodoForm(body.id, s, body.rect);
 }
 
 // ---------- settings window ----------
@@ -315,7 +377,7 @@ function openEditor() {
 // we watch the left mouse button: a press over the notice (and over the bare desktop,
 // not over some window) becomes a click in the scene. The desktop still sees the click
 // too, which only deselects icons.
-const catcher = { scene: null, rect: null, timer: null, wasDown: false };
+const catcher = { scene: null, rect: null, timer: null, wasDown: false, pressed: false, lastX: null, lastY: null };
 function setCatcher(s, r) {
   if (!r || !r.w || !r.h || S.paused || !WIN) { hideCatcher(); return; }
   catcher.scene = s; catcher.rect = r;
@@ -323,7 +385,8 @@ function setCatcher(s, r) {
 }
 function hideCatcher() {
   if (catcher.timer) clearInterval(catcher.timer);
-  catcher.timer = null; catcher.rect = null; catcher.scene = null;
+  if (catcher.pressed && catcher.scene) call(catcher.scene, 'SDV.host.up()');
+  catcher.timer = null; catcher.rect = null; catcher.scene = null; catcher.pressed = false;
 }
 function catcherTick() {
   const down = W.mouseDown();
@@ -332,8 +395,21 @@ function catcherTick() {
     const x = p.x - b.x, y = p.y - b.y;
     if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) {
       const ph = screen.dipToScreenPoint(p);
-      if (!W.coveredAt(ph.x, ph.y, ownHwnds)) call(catcher.scene, 'SDV.host.click(' + Math.round(x) + ',' + Math.round(y) + ')');
+      if (!W.coveredAt(ph.x, ph.y, ownHwnds)) {
+        catcher.pressed = true; catcher.lastX = x; catcher.lastY = y;
+        call(catcher.scene, 'SDV.host.down(' + Math.round(x) + ',' + Math.round(y) + ')');
+      }
     }
+  } else if (down && catcher.pressed && catcher.rect && catcher.scene) {
+    const p = screen.getCursorScreenPoint(), b = catcher.scene.display.bounds;
+    const x = Math.round(p.x - b.x), y = Math.round(p.y - b.y);
+    if (x !== catcher.lastX || y !== catcher.lastY) {   // dragging the notice's scrollbar
+      catcher.lastX = x; catcher.lastY = y;
+      call(catcher.scene, 'SDV.host.drag(' + x + ',' + y + ')');
+    }
+  } else if (!down && catcher.pressed && catcher.scene) {
+    catcher.pressed = false;
+    call(catcher.scene, 'SDV.host.up()');
   }
   catcher.wasDown = down;
 }
@@ -428,6 +504,44 @@ function setBoard(b) {
   S.board = b;
   const js = 'SDV.host.apply("board",' + JSON.stringify(b) + ')';
   callAll(js); editorCall(js);
+  reminderTick();
+}
+let todoForm = null;
+function closeTodoForm() {
+  if (!todoForm) return;
+  const form = todoForm;
+  todoForm = null;
+  if (!form.win.isDestroyed()) form.win.destroy();
+  callAll('SDV.board.hold(false)');   // the form is gone: the notice may close on its own again
+  editorCall('SDV.board.hold(false)');
+}
+function saveTodo(id, text, reminder) {
+  setBoard(R.save(boardData(), id, text, reminder || null, Date.now()));
+}
+function openTodoForm(id, scene, r) {
+  const b = boardData(), todo = id && b.todos.find(x => x.id === id);
+  if (id && !todo) return;
+  closeTodoForm();
+  const display = scene ? scene.display : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const area = display.workArea, bounds = display.bounds, width = 360, height = 360;
+  const x = Math.max(area.x, Math.min(area.x + area.width - width, scene && r ? bounds.x + r.x + r.w - width : area.x + (area.width - width) / 2));
+  const y = Math.max(area.y, Math.min(area.y + area.height - height, scene && r ? bounds.y + r.y + r.h + 8 : area.y + (area.height - height) / 2));
+  const win = new BrowserWindow({ x: Math.round(x), y: Math.round(y), width, height, show: false, resizable: false,
+    maximizable: false, minimizable: false, alwaysOnTop: true, skipTaskbar: true, title: todo ? '编辑待办' : '添加待办',
+    webPreferences: webPrefs('todo') });
+  win.setMenu(null);
+  win.on('closed', () => {
+    if (todoForm && todoForm.win === win) {   // closed from the title bar, not through todoClose
+      todoForm = null;
+      callAll('SDV.board.hold(false)');
+      editorCall('SDV.board.hold(false)');
+    }
+    forget(win);
+  });
+  todoForm = { win, wc: win.webContents, todo: todo ? { id: todo.id, text: todo.text, reminder: todo.reminder || null } : null };
+  win.loadURL('sdv://app/todo-form.html');
+  callAll('SDV.board.hold(true)');   // the form is the notice's child: keep it open
+  editorCall('SDV.board.hold(true)');
 }
 function hm(s) { const m = /^(\d{1,2}):(\d{2})$/.exec(s || ''); return m ? Number(m[1]) * 60 + Number(m[2]) : null; }
 function boardPay(b, d) {
@@ -453,8 +567,8 @@ function hmLeft(sec) { sec = Math.max(0, Math.ceil(sec / 60)); return Math.floor
 function boardTick() {
   const b = S.board;
   if (!b) return;
-  const t = todayKey();
-  const keep = (b.todos || []).filter(x => !x.done || x.doneDay === t);
+  const t = todayKey(), now = Date.now();
+  const keep = (b.todos || []).filter(x => (!x.done || x.doneDay === t) && !R.expired(x, now));
   let changed = keep.length !== (b.todos || []).length;
   if (b.today && b.today.day !== t) { b.today = null; changed = true; }
   if (changed) { b.todos = keep; setBoard(b); }
@@ -465,6 +579,52 @@ function boardTick() {
     const rang = playSfx('offwork', b);
     notifyUser('下班啦', (b.showMoney !== false && P.daily ? '今天挣了 ' + yuan(P.daily) + '，' : '') + (left ? '还有 ' + left + ' 件待办留到明天' : '辛苦了'), rang);
   }
+  reminderTick();
+}
+let reminderWindow = null;
+function hideReminder() {
+  if (reminderWindow && reminderWindow.visible) { reminderWindow.win.hide(); reminderWindow.visible = false; }
+}
+function refreshReminder() {
+  if (!reminderWindow || !reminderWindow.ready) return;
+  const ids = reminderWindow.ids;
+  const todos = boardData().todos.filter(t => ids.includes(t.id)).map(t => ({ id: t.id, text: t.text }));
+  run(reminderWindow.wc, 'SDV.reminderView.update(' + JSON.stringify({ todos, pet: S.pet }) + ')');
+}
+function showReminder(ids) {
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const a = display.workArea, width = 340, height = 245;
+  const x = Math.round(a.x + a.width - width - 8), y = Math.round(a.y + a.height - height - 8);
+  if (!reminderWindow) {
+    const win = new BrowserWindow({ x, y, width, height, show: false, transparent: true, frame: false, resizable: false,
+      maximizable: false, minimizable: false, skipTaskbar: true, alwaysOnTop: true, hasShadow: false,
+      backgroundColor: '#00000000', webPreferences: webPrefs('reminder') });
+    win.on('closed', () => { forget(win); reminderWindow = null; });
+    reminderWindow = { win, wc: win.webContents, ids: [], ready: false, visible: false };
+    win.loadURL('sdv://app/reminder.html');
+  }
+  reminderWindow.ids = ids;
+  reminderWindow.win.setPosition(x, y);
+  if (!reminderWindow.visible) { reminderWindow.win.showInactive(); remember(reminderWindow.win); }
+  reminderWindow.visible = true;
+  refreshReminder();
+}
+function reminderTick() {
+  const ids = R.due(S.board, Date.now());
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  if (!ids.length || locked || asleep || saver || W.foregroundFullscreen(physRect(display.bounds), ownHwnds)) { hideReminder(); return; }
+  const before = reminderWindow && reminderWindow.visible ? reminderWindow.ids : [];
+  showReminder(ids);
+  if (ids.some(id => !before.includes(id))) playSfx('reminder', S.board);
+}
+function reminderAction(body) {
+  if (!reminderWindow || !reminderWindow.visible) return;
+  const ids = reminderWindow.ids;
+  try {
+    const b = body.kind === 'ack' ? R.acknowledge(boardData(), ids)
+      : body.kind === 'snooze' ? R.snooze(boardData(), ids, Number(body.minutes), Date.now()) : null;
+    if (b) { hideReminder(); setBoard(b); }
+  } catch (e) { log('待办提醒操作失败：' + e); }
 }
 function boardTicked(before, after) {
   const was = {};
@@ -482,14 +642,7 @@ function boardTicked(before, after) {
   pushFocus();
   if (plus) playSfx('tick', after);
 }
-async function addTodoDialog() {
-  const text = await promptText({ title: '添加今日待办', message: '写一件今天要做的事，回车添加。', placeholder: '比如：回复邮件', ok: '添加' });
-  const t = (text || '').trim().slice(0, 40);
-  if (!t) return;
-  const b = boardData();
-  b.todos.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), text: t, done: false });
-  setBoard(b);
-}
+function addTodoDialog() { openTodoForm(null); }
 function boardAction(kind, val) {
   const b = boardData();
   if (kind === 'todo') {
@@ -767,14 +920,15 @@ function extractTracks(tracks, label) {
 }
 function sfxOn(b) { return ((b || S.board || {}).sound) !== false; }
 function playSfx(name, b) {
-  if (!sfxOn(b)) return false;
-  if (!fs.existsSync(musicFile('sfx_' + name))) {
+  if (name === 'reminder' ? (b && b.reminderSound === false) : !sfxOn(b)) return false;
+  const sample = name === 'reminder' ? 'tick' : name;
+  if (!fs.existsSync(musicFile('sfx_' + sample))) {
     if (sfx.tried) return false;
     sfx.tried = true;
     if (!extractTracks(Object.keys(SFX).map(k => ['sfx_' + k, SFX[k]]), '音效')) return false;
   }
-  const msg = { name, volume: name === 'tick' ? 0.55 : 0.7 };
-  if (!sfx.sent[name]) { try { msg.bytes = fs.readFileSync(musicFile('sfx_' + name)); sfx.sent[name] = true; } catch { return false; } }
+  const msg = { name: sample, volume: name === 'tick' || name === 'reminder' ? 0.55 : 0.7 };
+  if (!sfx.sent[sample]) { try { msg.bytes = fs.readFileSync(musicFile('sfx_' + sample)); sfx.sent[sample] = true; } catch { return false; } }
   audioSend('audio:sfx', msg);
   return true;
 }
@@ -896,6 +1050,7 @@ function restartCursorTimer() {
 function idleSeconds() { return powerMonitor.getSystemIdleTime(); }
 function startSaver(preview) {
   if (saver) return;
+  hideReminder();
   saver = { views: [], started: Date.now(), lastIdle: idleSeconds(), lastCursor: screen.getCursorScreenPoint(), alpha: 0, closing: false, preview };
   screen.getAllDisplays().forEach(d => {
     const b = d.bounds;
@@ -921,6 +1076,7 @@ function finishSaver() {
   saver = null;
   s.views.forEach(v => { forget(v.win); if (!v.win.isDestroyed()) v.win.destroy(); });
   applyPolicy();
+  reminderTick();
   log('屏保结束');
 }
 let saverClock = 0;
@@ -1052,6 +1208,7 @@ function makeTray() {
 app.on('second-instance', () => openEditor());
 app.on('window-all-closed', () => { /* keep running in the notification area */ });
 app.on('before-quit', () => { quitting = true; });
+app.on('will-quit', () => { globalShortcut.unregisterAll(); });
 
 app.whenReady().then(guard('start', async () => {
   serveScene();
@@ -1065,10 +1222,10 @@ app.whenReady().then(guard('start', async () => {
   screen.on('display-added', () => rebuildSoon());
   screen.on('display-removed', () => rebuildSoon());
   screen.on('display-metrics-changed', (e, d, changed) => { log('显示器参数变化：' + (changed || []).join('/')); rebuildSoon(); });
-  powerMonitor.on('lock-screen', () => { locked = true; applyPolicy(); });
-  powerMonitor.on('unlock-screen', () => { locked = false; applyPolicy(); });
-  powerMonitor.on('suspend', () => { asleep = true; applyPolicy(); });
-  powerMonitor.on('resume', () => { asleep = false; applyPolicy(); weather.lastAttempt = 0; rebuildSoon(true); });
+  powerMonitor.on('lock-screen', () => { locked = true; hideReminder(); applyPolicy(); });
+  powerMonitor.on('unlock-screen', () => { locked = false; applyPolicy(); reminderTick(); });
+  powerMonitor.on('suspend', () => { asleep = true; hideReminder(); applyPolicy(); });
+  powerMonitor.on('resume', () => { asleep = false; applyPolicy(); weather.lastAttempt = 0; rebuildSoon(true); reminderTick(); });
 
   setInterval(guard('coverage', () => { updateCoverage(); checkAttached(); }), 2000);
   setInterval(guard('weather', weatherTick), 15000);
@@ -1077,6 +1234,7 @@ app.whenReady().then(guard('start', async () => {
   setInterval(guard('music', musicTick), 2000);
   setInterval(guard('saver', saverTick), 50);
   updateCoverage();
+  applyTodoHotkey();
 
   if (app.isPackaged && !get('loginItemSetUp', false)) { set('loginItemSetUp', true); setLogin(true); }
   log('Stardew Desk 已启动（Windows 版），代码 ' + codeDir + '，运行目录 ' + sceneDir);

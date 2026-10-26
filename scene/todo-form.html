@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>待办</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: #f7e2b5; color: #3a2414;
+    font: 14px/1.5 "PingFang SC", "Microsoft YaHei UI", sans-serif; }
+  h1 { margin: 0 0 10px; font-size: 17px; }
+  input, select { width: 100%; padding: 6px; border: 1px solid #a8661a; border-radius: 4px;
+    background: #fff5dc; color: inherit; font: inherit; }
+  input[type=checkbox] { width: auto; padding: 0; accent-color: #8a5a33; }
+  .check { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+  label { display: block; margin-top: 8px; }
+  label span { display: block; font-size: 12px; }
+  .advance { display: flex; gap: 8px; }
+  #custom { width: 100px; }
+  #error { min-height: 20px; color: #a63524; font-size: 12px; }
+  .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  button { padding: 6px 12px; border: 1px solid #8a5a33; border-radius: 4px;
+    background: #e2c48e; color: inherit; font: inherit; cursor: pointer; }
+  button[type=submit] { background: #8a5a33; color: #fff5dc; }
+</style>
+</head>
+<body>
+<h1 id="heading">添加待办</h1>
+<form id="form">
+  <input id="text" type="text" maxlength="40" placeholder="今天要做的事" autocomplete="off" required>
+  <label class="check"><input id="remind" type="checkbox"> 设置提醒时间</label>
+  <div id="remind-fields">
+    <label><span>提醒日期与时间</span><input id="due" type="datetime-local"></label>
+    <label><span>提前提醒</span><span class="advance"><select id="advance">
+      <option value="0">准时</option><option value="5">提前 5 分钟</option><option value="10">提前 10 分钟</option>
+      <option value="15">提前 15 分钟</option><option value="30">提前 30 分钟</option>
+      <option value="60">提前 60 分钟</option><option value="custom">自定义分钟</option>
+    </select><input id="custom" type="number" min="1" step="1" placeholder="分钟" hidden></span></label>
+  </div>
+  <div id="error" role="alert"></div>
+  <div class="actions"><button type="button" id="cancel">取消</button><button type="submit">保存</button></div>
+</form>
+<script>
+  let id = null, originalReminder = null;
+  const post = body => window.webkit.messageHandlers.sdv.postMessage(body);
+  // A new to-do starts at the next half-hour slot: 1:02 → 1:30, 1:45 → 2:00.
+  function nextHalfHour(now) {
+    const d = new Date(now);
+    d.setSeconds(0, 0);
+    if (d.getMinutes() < 30) d.setMinutes(30);
+    else d.setHours(d.getHours() + 1, 0, 0, 0);
+    return d;
+  }
+  function inputTime(date) {
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  }
+  function syncRemind() {
+    document.getElementById('remind-fields').hidden = !document.getElementById('remind').checked;
+  }
+  window.SDV = { todoForm: { init(todo) {
+    id = todo ? todo.id : null;
+    document.getElementById('heading').textContent = id ? '编辑待办' : '添加待办';
+    const input = document.getElementById('text');
+    const remind = document.getElementById('remind');
+    const due = document.getElementById('due');
+    const select = document.getElementById('advance');
+    const custom = document.getElementById('custom');
+    input.value = todo ? todo.text : '';
+    due.value = '';
+    select.value = '0';
+    custom.value = '';
+    custom.hidden = true;
+    document.getElementById('error').textContent = '';
+    const r = todo && todo.reminder;
+    originalReminder = r;
+    remind.checked = Boolean(r);
+    if (r) {
+      due.value = inputTime(new Date(r.at));
+      if ([0, 5, 10, 15, 30, 60].includes(r.advance)) select.value = String(r.advance);
+      else { select.value = 'custom'; custom.value = r.advance; }
+      custom.hidden = select.value !== 'custom';
+    }
+    syncRemind();
+    input.focus(); input.select();
+  }, error(message) { document.getElementById('error').textContent = message; } } };
+  document.getElementById('remind').addEventListener('change', e => {
+    document.getElementById('remind-fields').hidden = !e.target.checked;
+    if (e.target.checked && !document.getElementById('due').value)
+      document.getElementById('due').value = inputTime(nextHalfHour(new Date()));
+  });
+  document.getElementById('advance').addEventListener('change', e => {
+    document.getElementById('custom').hidden = e.target.value !== 'custom';
+  });
+  document.getElementById('form').addEventListener('submit', e => {
+    e.preventDefault();
+    const text = document.getElementById('text').value.trim();
+    const remind = document.getElementById('remind').checked;
+    const due = document.getElementById('due').value;
+    const choice = document.getElementById('advance').value;
+    const advance = Number(choice === 'custom' ? document.getElementById('custom').value : choice);
+    const at = due ? new Date(due).getTime() : null;
+    const error = document.getElementById('error');
+    error.textContent = '';
+    if (!text) { error.textContent = '请填写待办内容'; return; }
+    const changed = !originalReminder || originalReminder.at !== at || originalReminder.advance !== advance;
+    if (remind && !due) { error.textContent = '请选择提醒时间'; return; }
+    if (remind && (!Number.isFinite(at) || !Number.isSafeInteger(advance) || advance < 0 ||
+      (choice === 'custom' && advance === 0) || (changed && at - advance * 60000 <= Date.now()))) {
+      error.textContent = '提醒时刻已过去，或提前分钟数无效，请重新选择'; return;
+    }
+    post({ type: 'todoSave', id, text, reminder: remind ? { at, advance } : null });
+  });
+  document.getElementById('cancel').addEventListener('click', () => post({ type: 'todoClose' }));
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') post({ type: 'todoClose' }); });
+  post({ type: 'hello' });
+</script>
+</body>
+</html>

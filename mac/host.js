@@ -12,6 +12,7 @@ ObjC.import('WebKit');
 ObjC.import('CoreGraphics');
 ObjC.import('ServiceManagement');
 ObjC.import('AVFoundation');
+ObjC.import('ApplicationServices');
 
 var APP_NAME = 'Stardew Desk';
 // In JXA a JS `null` passed where Cocoa expects an object arrives as NSNull, not nil.
@@ -25,6 +26,7 @@ var musicScript = null;       // musicx.js
 var SUPPORT = $.NSHomeDirectory().js + '/Library/Application Support/Stardew Desk';
 var DATA_VERSION = '7';       // must match scene/setup.js
 var setup = null;             // first-run window: {win, wv, ucc, tried}
+var retired = [];             // closed windows kept alive: releasing their WKWebView crashes the host
 var scenes = [];           // {screen, frame, win, wv, ready, fps, cursor}
 var coverage = [];         // per scene, 0..1
 var windowRects = [];      // ordinary app windows (Quartz coords), refreshed with coverage
@@ -204,9 +206,15 @@ function applySetting(key, value) {
   else if (key === 'layout') S.layout = value;
   else if (key === 'pet') S.pet = value || 'cat0';
   else if (key === 'time') timeOverride = value == null ? null : value;
-  else if (key === 'board') { boardTicked(S.board, value); S.board = value; }
+  else if (key === 'board') {
+    var hotkeyBefore = JSON.stringify((S.board || {}).todoHotkey || null);
+    boardTicked(S.board, value);
+    S.board = value;
+    if (JSON.stringify((S.board || {}).todoHotkey || null) !== hotkeyBefore) applyTodoHotkey();
+  }
   else return;
   callAll('SDV.host.apply(' + JSON.stringify(key) + ',' + JSON.stringify(value == null ? null : value) + ')');
+  if (key === 'board') reminderTick();
 }
 
 // Everything a freshly loaded scene needs to match the others.
@@ -240,11 +248,9 @@ function buildScenes() {
     var f = screen.frame;
     return [f.origin.x, f.origin.y, f.size.width, f.size.height, screen.backingScaleFactor].join(',');
   });
-  // AppKit can send screen-parameter notifications during desktop/window transitions.
-  // Recreating every WKWebView for a duplicate notification flashes the desktop and
-  // reinitializes transient scene state (including animal positions), even if no display changed.
+  // Recreating every WKWebView for an unchanged layout flashes the desktop and
+  // reinitializes transient scene state (including animal positions).
   if (scenes.length === list.length && scenes.every(function (s, i) { return s.screenKey === keys[i]; })) {
-    log('屏幕参数通知：显示器布局未变化，保留现有场景');
     return;
   }
   hideCatcher();
@@ -275,6 +281,19 @@ function pushSettings(s) {
 }
 
 function onMessage(wv, body) {
+  if (reminderWindow && reminderWindow.wv.isEqual(wv)) {
+    if (body && body.type === 'hello') { reminderWindow.ready = true; refreshReminder(); }
+    else if (body && body.type === 'reminderAction') reminderAction(body);
+    return;
+  }
+  if (todoForm && todoForm.wv.isEqual(wv)) {
+    if (body && body.type === 'hello') { todoForm.ready = true; todoForm.wv.evaluateJavaScriptCompletionHandler($('SDV.todoForm.init(' + JSON.stringify(todoForm.todo) + ')'), noop); }
+    else if (body && body.type === 'todoSave') {
+      try { saveTodo(body.id, body.text, body.reminder); closeTodoForm(); }
+      catch (e) { todoForm.wv.evaluateJavaScriptCompletionHandler($('SDV.todoForm.error(' + JSON.stringify(String(e)) + ')'), noop); }
+    } else if (body && body.type === 'todoClose') closeTodoForm();
+    return;
+  }
   if (setup && setup.wv.isEqual(wv)) { onSetupMessage(body || {}); return; }
   if (saver) {
     for (var j = 0; j < saver.views.length; j++) {
@@ -295,6 +314,8 @@ function onMessage(wv, body) {
       if (boardPanelWanted) { boardPanelWanted = false; editorCall('SDV.host.openBoard()'); }
     } else if (body && body.type === 'setting') {
       applySetting(body.key, body.value);
+    } else if (body && body.type === 'todoEdit') {
+      openTodoForm(body.id, null, body.rect);
     } else if (body && body.type === 'mailRead') {
       markMailRead();
     }
@@ -325,6 +346,8 @@ function onMessage(wv, body) {
     setCatcher(s, body.rect || null);
   } else if (body.type === 'board') {
     setBoard(body.value);               // a to-do ticked on the desktop
+  } else if (body.type === 'todoEdit') {
+    openTodoForm(body.id, s, body.rect);
   }
 }
 
@@ -352,7 +375,10 @@ function setCatcher(s, r) {
     win.hidesOnDeactivate = false;
     win.backgroundColor = $.NSColor.colorWithCalibratedWhiteAlpha(0, 0.01);   // all but invisible, yet it takes the click
     win.ignoresMouseEvents = false;
-    if (clickViewClass) win.contentView = $[clickViewClass].alloc.initWithFrame($.NSMakeRect(0, 0, r.w, r.h));
+    if (clickViewClass) {
+      win.contentView = $[clickViewClass].alloc.initWithFrame($.NSMakeRect(0, 0, r.w, r.h));
+      win.contentView.autoresizingMask = 2 | 16;   // follow the panel when the notice changes size
+    }
     catcher = { win: win };
   }
   catcher.scene = s;
@@ -363,10 +389,29 @@ function setCatcher(s, r) {
 function hideCatcher() {
   if (catcher && catcher.rect) { catcher.win.orderOut(NIL); catcher.rect = null; }
 }
-function catcherClick(ev) {
-  if (!catcher || !catcher.rect) return;
+function catcherPoint(ev) {
   var p = ev.locationInWindow, r = catcher.rect;
-  call(catcher.scene, 'SDV.host.click(' + Math.round(r.x + p.x) + ',' + Math.round(r.y + r.h - p.y) + ')');
+  return { x: Math.round(r.x + p.x), y: Math.round(r.y + r.h - p.y) };
+}
+function catcherDown(ev) {
+  if (!catcher || !catcher.rect) return;
+  var p = catcherPoint(ev);
+  call(catcher.scene, 'SDV.host.down(' + p.x + ',' + p.y + ')');
+}
+function catcherDrag(ev) {
+  if (!catcher || !catcher.rect) return;
+  var p = catcherPoint(ev);
+  call(catcher.scene, 'SDV.host.drag(' + p.x + ',' + p.y + ')');
+}
+function catcherUp() {
+  if (catcher && catcher.scene) call(catcher.scene, 'SDV.host.up()');
+}
+// The notice's to-do list scrolls: forward the wheel and the scrollbar drag.
+function catcherWheel(ev) {
+  if (!catcher || !catcher.rect) return;
+  var p = catcherPoint(ev), dy = ev.scrollingDeltaY;
+  if (!ev.hasPreciseScrollingDeltas) dy *= 20;
+  call(catcher.scene, 'SDV.host.wheel(0,' + Math.round(-dy) + ',' + p.x + ',' + p.y + ')');
 }
 
 // ---------- mailbox: new files on the Desktop / in Downloads ----------
@@ -488,6 +533,113 @@ function setBoard(b) {
   var js = 'SDV.host.apply("board",' + JSON.stringify(b) + ')';
   callAll(js);
   editorCall(js);
+  reminderTick();
+}
+var todoForm = null;
+var reminderRules = null;
+function reminders() {
+  if (!reminderRules) {
+    var source = $.NSString.stringWithContentsOfFileEncodingError($(codeDir + '/todo-reminders.js'), $.NSUTF8StringEncoding, null).js;
+    reminderRules = eval(source + '\nSDVReminder');
+  }
+  return reminderRules;
+}
+// The form panel is kept and hidden rather than closed: releasing its WKWebView —
+// especially from inside the page's own message handler — trips a WebKit assertion
+// in this macOS build and SIGKILLs the host, so the same panel is reused.
+function closeTodoForm() {
+  if (!todoForm) return;
+  todoForm.win.orderOut(NIL);
+  callAll('SDV.board.hold(false)');
+  editorCall('SDV.board.hold(false)');
+}
+function saveTodo(id, text, reminder) {
+  setBoard(reminders().save(boardData(), id, text, reminder || null, Date.now()));
+}
+function openTodoForm(id, scene, r) {
+  var b = boardData(), todo = id && b.todos.find(function (t) { return t.id === id; });
+  if (id && !todo) return;
+  var screen = scene ? scene.screen : $.NSScreen.mainScreen;
+  var f = screen.visibleFrame, w = 360, h = 340;
+  var x = scene && r ? scene.frame.x + r.x + r.w - w : f.origin.x + (f.size.width - w) / 2;
+  var y = scene && r ? scene.frame.y + scene.frame.h - r.y - r.h - h - 8 : f.origin.y + (f.size.height - h) / 2;
+  x = Math.max(f.origin.x, Math.min(f.origin.x + f.size.width - w, x));
+  y = Math.max(f.origin.y, Math.min(f.origin.y + f.size.height - h, y));
+  var data = todo ? { id: todo.id, text: todo.text, reminder: todo.reminder || null } : null;
+  if (!todoForm) {
+    var win = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer($.NSMakeRect(x, y, w, h), 1 | 2, 2, false);
+    win.level = 3;
+    win.releasedWhenClosed = false;
+    var web = makeWebView(w, h, 'todo', 'todo-form.html');
+    win.contentView = web.wv;
+    todoForm = { win: win, wv: web.wv, ucc: web.ucc, ready: false, todo: data };
+    // the selector must be a plain string; an NSString makes AppKit send a wrong selector
+    if (target) $.NSNotificationCenter.defaultCenter.addObserverSelectorNameObject(target, 'todoFormClosed:', $('NSWindowWillCloseNotification'), win);
+    else log('待办窗口关闭监听未注册：target 尚未建立');
+  } else {
+    todoForm.todo = data;
+    todoForm.win.setFrameDisplay($.NSMakeRect(x, y, w, h), false);
+    if (todoForm.ready) todoForm.wv.evaluateJavaScriptCompletionHandler($('SDV.todoForm.init(' + JSON.stringify(data) + ')'), noop);
+  }
+  todoForm.win.title = $(todo ? '编辑待办' : '添加待办');
+  $.NSApplication.sharedApplication.activateIgnoringOtherApps(true);
+  todoForm.win.makeKeyAndOrderFront(NIL);
+  callAll('SDV.board.hold(true)');      // the form is the notice's child: keep it open
+  editorCall('SDV.board.hold(true)');
+}
+// A passive global monitor; macOS only delivers keys pressed in other apps when the
+// host is allowed under 系统设置 › 隐私与安全性 › 辅助功能.
+var todoHotkeyMonitor = null;
+// KeyboardEvent.code (a physical key) → macOS virtual key code. The browser's
+// `keyCode` is the legacy DOM code (84 for T), which never matches NSEvent's 17.
+var KEY_CODES = {
+  KeyA: 0, KeyS: 1, KeyD: 2, KeyF: 3, KeyH: 4, KeyG: 5, KeyZ: 6, KeyX: 7, KeyC: 8, KeyV: 9,
+  KeyB: 11, KeyQ: 12, KeyW: 13, KeyE: 14, KeyR: 15, KeyY: 16, KeyT: 17,
+  KeyO: 31, KeyU: 32, KeyI: 34, KeyP: 35, KeyL: 37, KeyJ: 38, KeyK: 40, KeyN: 45, KeyM: 46,
+  Digit1: 18, Digit2: 19, Digit3: 20, Digit4: 21, Digit5: 23, Digit6: 22, Digit7: 26,
+  Digit8: 28, Digit9: 25, Digit0: 29,
+  Numpad0: 82, Numpad1: 83, Numpad2: 84, Numpad3: 85, Numpad4: 86, Numpad5: 87, Numpad6: 88,
+  Numpad7: 89, Numpad8: 91, Numpad9: 92, NumpadDecimal: 65, NumpadAdd: 69, NumpadSubtract: 78,
+  NumpadMultiply: 67, NumpadDivide: 75, NumpadEnter: 76,
+  Equal: 24, Minus: 27, BracketRight: 30, BracketLeft: 33, Quote: 39, Semicolon: 41,
+  Backslash: 42, Comma: 43, Slash: 44, Period: 47, Backquote: 50, Space: 49, Tab: 48, Enter: 36,
+  Escape: 53, Backspace: 51, Delete: 117,
+  ArrowLeft: 123, ArrowRight: 124, ArrowDown: 125, ArrowUp: 126,
+  Home: 115, End: 119, PageUp: 116, PageDown: 121,
+  F1: 122, F2: 120, F3: 99, F4: 118, F5: 96, F6: 97, F7: 98, F8: 100, F9: 101, F10: 109,
+  F11: 103, F12: 111, F13: 105, F14: 107, F15: 113, F16: 106, F17: 64, F18: 79, F19: 80, F20: 90,
+};
+function hotkeyFlags(h) {
+  return (h.shift ? 1 << 17 : 0) | (h.ctrl ? 1 << 18 : 0) | (h.alt ? 1 << 19 : 0) | (h.meta ? 1 << 20 : 0);
+}
+function hotkeyMatches(event, h) {
+  var want = KEY_CODES[h.code];
+  if (want != null) return Number(event.keyCode) === want;
+  // Keys without a physical entry: compare the typed character, which follows the layout.
+  if (typeof h.key === 'string' && h.key.length === 1) {
+    var chars = ObjC.unwrap(event.charactersIgnoringModifiers) || '';
+    return String(chars).toLowerCase() === h.key.toLowerCase();
+  }
+  return false;
+}
+function applyTodoHotkey() {
+  if (todoHotkeyMonitor) { $.NSEvent.removeMonitor(todoHotkeyMonitor); todoHotkeyMonitor = null; }
+  var h = (S.board || {}).todoHotkey;
+  if (!h || !(h.meta || h.ctrl || h.alt)) return;
+  if (!$.AXIsProcessTrusted()) {
+    try {
+      $.AXIsProcessTrustedWithOptions($.NSDictionary.dictionaryWithObjectForKey(
+        $.NSNumber.numberWithBool(true), $('AXTrustedCheckOptionPrompt')));
+    } catch (e) { log('辅助功能授权提示失败：' + e); }
+  }
+  var flags = hotkeyFlags(h);
+  todoHotkeyMonitor = $.NSEvent.addGlobalMonitorForEventsMatchingMaskHandler(1 << 10, function (event) {
+    if (event.isARepeat) return;
+    if ((event.modifierFlags & 0x001E0000) !== flags) return;   // Shift|Control|Option|Command
+    if (!hotkeyMatches(event, h)) return;
+    openTodoForm(null);
+  });
+  log('新建待办快捷键：' + (h.key || h.code || h.keyCode));
 }
 function hm(s) { var m = /^(\d{1,2}):(\d{2})$/.exec(s || ''); return m ? Number(m[1]) * 60 + Number(m[2]) : null; }
 // Same sums as scene/board.js: where today's working day stands, or null.
@@ -514,12 +666,15 @@ function boardTodos(b) {
 }
 function yuan(v) { return Math.floor(v + 1e-9) + '金'; }   // whole gold, as the game shows money
 function hmLeft(sec) { sec = Math.max(0, Math.ceil(sec / 60)); return Math.floor(sec / 60) + ':' + ('0' + sec % 60).slice(-2); }
-// Every few seconds: drop yesterday's finished to-dos, and say when the day is done.
+// Every few seconds: drop yesterday's finished to-dos and to-dos whose reminder day is
+// over, and say when the day is done.
 function boardTick() {
   var b = S.board;
   if (!b) return;
-  var t = todayKey();
-  var keep = (b.todos || []).filter(function (x) { return !x.done || x.doneDay === t; });
+  var t = todayKey(), now = Date.now(), R = reminders();
+  var keep = (b.todos || []).filter(function (x) {
+    return (!x.done || x.doneDay === t) && !R.expired(x, now);
+  });
   var changed = keep.length !== (b.todos || []).length;
   if (b.today && b.today.day !== t) { b.today = null; changed = true; }
   if (changed) { b.todos = keep; setBoard(b); }
@@ -530,6 +685,73 @@ function boardTick() {
     var rang = playSfx('offwork', b);
     notifyUser('下班啦', (b.showMoney !== false && P.daily ? '今天挣了 ' + yuan(P.daily) + '，' : '') + (left ? '还有 ' + left + ' 件待办留到明天' : '辛苦了'), rang);
   }
+  reminderTick();
+}
+var reminderWindow = null;
+function reminderFullscreen() {
+  var p = $.NSEvent.mouseLocation, f = $.NSScreen.mainScreen.frame;
+  $.NSScreen.screens.js.forEach(function (s) {
+    var q = s.frame;
+    if (p.x >= q.origin.x && p.x < q.origin.x + q.size.width && p.y >= q.origin.y && p.y < q.origin.y + q.size.height) f = q;
+  });
+  var top = $.NSScreen.screens.js[0].frame.size.height - f.origin.y - f.size.height;
+  return windowRects.some(function (r) {
+    return r.x <= f.origin.x + 2 && r.y <= top + 2 && r.x + r.w >= f.origin.x + f.size.width - 2 && r.y + r.h >= top + f.size.height - 2;
+  });
+}
+function hideReminder() {
+  if (reminderWindow && reminderWindow.visible) { reminderWindow.win.orderOut(NIL); reminderWindow.visible = false; }
+}
+function refreshReminder() {
+  if (!reminderWindow || !reminderWindow.ready) return;
+  var ids = reminderWindow.ids;
+  var todos = boardData().todos.filter(function (t) { return ids.indexOf(t.id) >= 0; }).map(function (t) { return { id: t.id, text: t.text }; });
+  reminderWindow.wv.evaluateJavaScriptCompletionHandler($('SDV.reminderView.update(' + JSON.stringify({ todos: todos, pet: S.pet }) + ')'), noop);
+}
+function showReminder(ids) {
+  var p = $.NSEvent.mouseLocation;
+  var screen = $.NSScreen.screens.js.filter(function (s) {
+    var f = s.frame; return p.x >= f.origin.x && p.x < f.origin.x + f.size.width && p.y >= f.origin.y && p.y < f.origin.y + f.size.height;
+  })[0] || $.NSScreen.mainScreen;
+  var f = screen.visibleFrame, w = 340, h = 245;
+  var r = $.NSMakeRect(f.origin.x + f.size.width - w - 8, f.origin.y + 8, w, h);
+  if (!reminderWindow) {
+    var win = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(r, 1 << 7, 2, false);
+    win.level = 25;
+    win.collectionBehavior = (1 << 0) | (1 << 4);
+    win.opaque = false; win.hasShadow = false; win.releasedWhenClosed = false;
+    win.backgroundColor = $.NSColor.clearColor;
+    var web = makeWebView(w, h, 'reminder', 'reminder.html');
+    // WKWebView paints an opaque white backing by default; the panel is a transparent
+    // rounded card, so let the page's own alpha show through.
+    try { web.wv.setValueForKey($.NSNumber.numberWithBool(false), 'drawsBackground'); }
+    catch (e) { log('drawsBackground 不可用: ' + e); }
+    web.wv.underPageBackgroundColor = $.NSColor.clearColor;
+    win.contentView = web.wv;
+    reminderWindow = { win: win, wv: web.wv, ids: [], ready: false, visible: false };
+  }
+  reminderWindow.ids = ids;
+  reminderWindow.win.setFrameDisplay(r, false);
+  reminderWindow.win.orderFrontRegardless;
+  reminderWindow.visible = true;
+  refreshReminder();
+}
+function reminderTick() {
+  if (!reminderRules && !codeDir) return;
+  var ids = reminders().due(S.board, Date.now());
+  if (!ids.length || locked || screensAsleep || saver || reminderFullscreen()) { hideReminder(); return; }
+  var before = reminderWindow && reminderWindow.visible ? reminderWindow.ids : [];
+  showReminder(ids);
+  if (ids.some(function (id) { return before.indexOf(id) < 0; })) playSfx('reminder', S.board);
+}
+function reminderAction(body) {
+  if (!reminderWindow || !reminderWindow.visible) return;
+  var ids = reminderWindow.ids;
+  try {
+    var b = body.kind === 'ack' ? reminders().acknowledge(boardData(), ids)
+      : body.kind === 'snooze' ? reminders().snooze(boardData(), ids, Number(body.minutes), Date.now()) : null;
+    if (b) { hideReminder(); setBoard(b); }
+  } catch (e) { log('待办提醒操作失败：' + e); }
 }
 // A to-do ticked off (anywhere: desktop, menu, settings window): the game's coin
 // "ding", and its note goes into the shipping bin, counted with today's harvest.
@@ -551,23 +773,7 @@ function boardTicked(before, after) {
 }
 // Leaf menu → 公告板 → 添加待办…: a small box, Return adds it.
 function addTodoDialog() {
-  var app = $.NSApplication.sharedApplication;
-  app.activateIgnoringOtherApps(true);
-  var alert = $.NSAlert.alloc.init;
-  alert.messageText = $('添加今日待办');
-  alert.informativeText = $('写一件今天要做的事，回车添加。');
-  alert.addButtonWithTitle($('添加'));
-  alert.addButtonWithTitle($('取消'));
-  var tf = $.NSTextField.alloc.initWithFrame($.NSMakeRect(0, 0, 280, 24));
-  tf.placeholderString = $('比如：回复邮件');
-  alert.accessoryView = tf;
-  alert.window.initialFirstResponder = tf;
-  var r = alert.runModal;
-  var text = tf.stringValue.js.trim().slice(0, 40);
-  if (r !== 1000 || !text) return;
-  var b = boardData();
-  b.todos.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), text: text, done: false });
-  setBoard(b);
+  openTodoForm(null);
 }
 
 // ---------- sound effects from the game ----------
@@ -575,7 +781,7 @@ function addTodoDialog() {
 // Taken out of the game's wave bank once (same as the music), then played by the app.
 var SFX = { tick: 5, offwork: 326 };
 var sfx = { task: null, tried: false, players: {} };
-function sfxFile(name) { return MUSIC_DIR + '/sfx_' + name + '.m4a'; }
+function sfxFile(name) { return MUSIC_DIR + '/sfx_' + (name === 'reminder' ? 'tick' : name) + '.m4a'; }
 function sfxOn(b) { return ((b || S.board || {}).sound) !== false; }
 function prepareSfx() {
   if (sfx.task || sfx.tried) return;
@@ -596,7 +802,7 @@ function sfxTick() {
   if (sfxOn() && !sfx.tried && Object.keys(SFX).some(function (k) { return !exists(sfxFile(k)); })) prepareSfx();
 }
 function playSfx(name, b) {
-  if (!sfxOn(b)) return false;
+  if (name === 'reminder' ? (b && b.reminderSound === false) : !sfxOn(b)) return false;
   if (!exists(sfxFile(name))) { prepareSfx(); return false; }
   var p = sfx.players[name];
   if (!p) {
@@ -604,7 +810,7 @@ function playSfx(name, b) {
     if (!p || p.isNil()) return false;
     sfx.players[name] = p;
   }
-  p.volume = name === 'tick' ? 0.55 : 0.7;
+  p.volume = name === 'tick' || name === 'reminder' ? 0.55 : 0.7;
   p.currentTime = 0;
   p.play;
   return true;
@@ -887,10 +1093,12 @@ function openSetup(mode) {
 }
 function closeSetup() {
   if (!setup) return;
-  try { setup.ucc.removeScriptMessageHandlerForName('sdv'); } catch (e) { /* ignore */ }
-  setup.win.orderOut(NIL);
-  setup.win.close;
+  var s = setup;
   setup = null;
+  try { s.ucc.removeScriptMessageHandlerForName('sdv'); } catch (e) { /* ignore */ }
+  s.win.orderOut(NIL);
+  s.win.close;
+  retired.push(s);
 }
 function setupCall(js) { if (setup) setup.wv.evaluateJavaScriptCompletionHandler($(js), noop); }
 function sendSetupStart() {
@@ -1216,6 +1424,7 @@ function displayHeldAwake() {
 
 function startSaver(preview) {
   if (saver) return;
+  hideReminder();
   var app = $.NSApplication.sharedApplication;
   var prev = $.NSWorkspace.sharedWorkspace.frontmostApplication;
   saver = { views: [], prevApp: prev, started: Date.now(), lastIdle: idleSeconds(), alpha: 0, closing: false, preview: preview };
@@ -1258,6 +1467,7 @@ function finishSaver() {
   $.NSCursor.unhide;
   try { if (s.prevApp && !s.prevApp.isNil()) s.prevApp.activateWithOptions(2); } catch (e) { /* ignore */ }
   applyPolicy();
+  reminderTick();
   log('屏保结束');
 }
 
@@ -1417,30 +1627,43 @@ ObjC.registerSubclass({
     'focusTick:': { types: ['void', ['id']], implementation: guard('focus', function () { focusTick(); boardTick(); }) },
     'mailTick:': { types: ['void', ['id']], implementation: guard('mail', function () { mailTick(); }) },
     'cursorTick:': { types: ['void', ['id']], implementation: guard('cursor', function () { cursorTick(); }) },
-    'coverageTick:': { types: ['void', ['id']], implementation: guard('coverage', function () { updateCoverage(); }) },
+    // Polling avoids a display-notification storm calling back into JXA/WebKit.
+    'coverageTick:': { types: ['void', ['id']], implementation: guard('coverage', function () {
+      if (scenes.length || dataReady()) buildScenes();
+      updateCoverage();
+    }) },
     'weatherTick:': { types: ['void', ['id']], implementation: guard('weather', function () { weatherTick(); }) },
     'saverTick:': { types: ['void', ['id']], implementation: guard('saver', function () { saverTick(); }) },
     'menuAction:': { types: ['void', ['id']], implementation: guard('menu', function (sender) { menuAction(sender); }) },
     'menuNeedsUpdate:': { types: ['void', ['id']], implementation: guard('menuUpdate', function (menu) { rebuildMenu(menu); }) },
-    'screensChanged:': { types: ['void', ['id']], implementation: guard('screens', function () { log('收到显示器参数变更通知'); buildScenes(); }) },
+    // the to-do form is the notice's child: closing it anywhere (its own Cancel or the
+    // title-bar button) has to release the hold that kept the notice open.
+    'todoFormClosed:': { types: ['void', ['id']], implementation: guard('todoform', function () {
+      callAll('SDV.board.hold(false)'); editorCall('SDV.board.hold(false)');
+    }) },
     'powerChanged:': { types: ['void', ['id']], implementation: guard('power', function () { applyPolicy(); }) },
-    'slept:': { types: ['void', ['id']], implementation: guard('sleep', function () { screensAsleep = true; applyPolicy(); }) },
-    'woke:': { types: ['void', ['id']], implementation: guard('wake', function () { screensAsleep = false; applyPolicy(); }) },
-    'locked:': { types: ['void', ['id']], implementation: guard('lock', function () { locked = true; applyPolicy(); }) },
-    'unlocked:': { types: ['void', ['id']], implementation: guard('unlock', function () { locked = false; applyPolicy(); }) },
+    'slept:': { types: ['void', ['id']], implementation: guard('sleep', function () { screensAsleep = true; hideReminder(); applyPolicy(); }) },
+    'woke:': { types: ['void', ['id']], implementation: guard('wake', function () { screensAsleep = false; applyPolicy(); reminderTick(); }) },
+    'locked:': { types: ['void', ['id']], implementation: guard('lock', function () { locked = true; hideReminder(); applyPolicy(); }) },
+    'unlocked:': { types: ['void', ['id']], implementation: guard('unlock', function () { locked = false; applyPolicy(); reminderTick(); }) },
   },
 });
 var clickViewClass = null;    // the view inside the click catcher
 (function () {
-  var down = { types: ['void', ['id']], implementation: guard('click', function (ev) { catcherClick(ev); }) };
+  var down = { types: ['void', ['id']], implementation: guard('click', function (ev) { catcherDown(ev); }) };
+  var dragged = { types: ['void', ['id']], implementation: guard('click', function (ev) { catcherDrag(ev); }) };
+  var up = { types: ['void', ['id']], implementation: guard('click', function (ev) { catcherUp(); }) };
+  var wheel = { types: ['void', ['id']], implementation: guard('scroll', function (ev) { catcherWheel(ev); }) };
+  var methods = { 'mouseDown:': down, 'mouseDragged:': dragged, 'mouseUp:': up, 'scrollWheel:': wheel };
   try {
     // take the very first click, even though this app is never the active one
     ObjC.registerSubclass({ name: 'SDVClickView', superclass: 'NSView', methods: {
-      'mouseDown:': down, 'acceptsFirstMouse:': { types: ['bool', ['id']], implementation: function () { return true; } } } });
+      'mouseDown:': down, 'mouseDragged:': dragged, 'mouseUp:': up, 'scrollWheel:': wheel,
+      'acceptsFirstMouse:': { types: ['bool', ['id']], implementation: function () { return true; } } } });
     clickViewClass = 'SDVClickView';
   } catch (e) {
     log('点击视图（带 acceptsFirstMouse）注册失败：' + e);
-    try { ObjC.registerSubclass({ name: 'SDVClickViewPlain', superclass: 'NSView', methods: { 'mouseDown:': down } }); clickViewClass = 'SDVClickViewPlain'; } catch (e2) { log('点击视图注册失败：' + e2); }
+    try { ObjC.registerSubclass({ name: 'SDVClickViewPlain', superclass: 'NSView', methods: methods }); clickViewClass = 'SDVClickViewPlain'; } catch (e2) { log('点击视图注册失败：' + e2); }
   }
 })();
 ObjC.registerSubclass({
@@ -1474,7 +1697,6 @@ function start() {
   else openSetup('full');            // first run: read the pictures from the game, then the scenes start
 
   var nc = $.NSNotificationCenter.defaultCenter;
-  nc.addObserverSelectorNameObject(target, 'screensChanged:', $('NSApplicationDidChangeScreenParametersNotification'), NIL);
   nc.addObserverSelectorNameObject(target, 'powerChanged:', $('NSProcessInfoPowerStateDidChangeNotification'), NIL);
   var ws = $.NSWorkspace.sharedWorkspace.notificationCenter;
   ws.addObserverSelectorNameObject(target, 'slept:', $('NSWorkspaceScreensDidSleepNotification'), NIL);
@@ -1490,6 +1712,7 @@ function start() {
   $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(2, target, 'musicTick:', NIL, true);
   $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.05, target, 'saverTick:', NIL, true);
   updateCoverage();
+  applyTodoHotkey();
 
   if (!DEBUG && !getBool('loginItemSetUp', false)) { setBool('loginItemSetUp', true); setLogin(true); }
   log('Stardew Desk 已启动，代码 ' + codeDir + '，运行目录 ' + sceneDir);

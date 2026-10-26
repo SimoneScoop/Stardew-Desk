@@ -5,9 +5,8 @@
  * set, what today has earned so far; resting the cursor on the board opens the full
  * notice: progress, countdown and the to-do list.
  *
- * The desktop scene can't be clicked (clicks belong to the desktop icons), so to-dos
- * and pay are edited in the settings window (panel below) or ticked off from the leaf
- * menu. The app keeps the data; nothing leaves the Mac.
+ * The host catches clicks on the notice above the desktop icons. The app keeps
+ * the data locally; nothing leaves the computer.
  *
  * Data: {todos: [{id, text, done, doneDay}], pay: {daily, start, end, lunch, lunchStart,
  *        lunchEnd, days: [0–6]}, show, showMoney, remind, today: {day, mode: 'work'|'off'}} */
@@ -30,6 +29,9 @@ SDV.board = (() => {
       todos: Array.isArray(o.todos) ? o.todos.filter(t => t && t.id && typeof t.text === 'string') : [],
       pay,
       show: o.show !== false, showMoney: o.showMoney !== false, remind: o.remind !== false, sound: o.sound !== false,
+      reminderSound: o.reminderSound !== false,
+      todoHotkey: o.todoHotkey && typeof o.todoHotkey === 'object' &&
+        (typeof o.todoHotkey.code === 'string' || Number.isInteger(o.todoHotkey.keyCode)) ? o.todoHotkey : null,
       today: o.today && o.today.day ? o.today : null,
       payOn: o.payOn != null ? Boolean(o.payOn) : Boolean(o.pay),   // countdown wanted at all
     };
@@ -78,7 +80,10 @@ SDV.board = (() => {
       toEnd: (e - m) * 60, toStart: (s - m) * 60, toLunchEnd: lunch ? (le - m) * 60 : 0, sinceEnd: (m - e) * 60, lunchEnd: p.lunchEnd,
     };
   }
-  const todos = date => B.todos.filter(t => !t.done || t.doneDay === dayKey(date));
+  const todos = date => {
+    const list = B.todos.filter(t => !t.done || t.doneDay === dayKey(date));
+    return list.filter(t => !t.done).concat(list.filter(t => t.done));   // ticked ones go to the end
+  };
   const openCount = date => todos(date).filter(t => !t.done).length;
 
   // ---------- the board itself (original pixel art, 32×32) ----------
@@ -135,8 +140,14 @@ SDV.board = (() => {
   // ---------- the notice drawn over the scene (screen px) ----------
   const C = { paper: '#f7e2b5', edge: '#5b3a22', line: '#c47a2c', ink: '#3a2414', dim: '#8a6a48', gold: '#a8661a', green: '#5daa3c', bar: '#e2c48e' };
   let hoverFor = 0, outFor = 0, open = false, lastRect = null;
-  let hits = [];             // to-do rows on screen (device px) while the notice is open: [{x, y, w, h, id}]
-  let onToggle = () => {};
+  let held = false;          // the to-do form is open: keep the notice up
+  let scroll = 0;            // first visible to-do row in the notice
+  let sb = null, sbDrag = null, wheelAcc = 0;   // scrollbar geometry, drag, wheel remainder
+  let hits = [];             // clickable regions on the open notice (device px)
+  let onToggle = () => {}, onEdit = () => {};
+
+  const clampScroll = (v, max) => Math.max(0, Math.min(max, v));
+  const inBox = (x, y, r) => Boolean(r) && x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
 
   function compactLines(date) {
     const P = pay(date), n = openCount(date);
@@ -174,11 +185,12 @@ SDV.board = (() => {
     const { anchor, cursor, overBoard, dt, k, W, H } = opts;
     const date = new Date();
     hits = [];
-    if (!B.show) { lastRect = null; open = false; return; }
+    sb = null;
+    if (!B.show) { lastRect = null; open = false; sbDrag = null; return; }
     const inPanel = cursor && lastRect && open && cursor.x >= lastRect.x && cursor.x < lastRect.x + lastRect.w && cursor.y >= lastRect.y && cursor.y < lastRect.y + lastRect.h;
     if (overBoard || inPanel) { hoverFor += dt; outFor = 0; } else { outFor += dt; hoverFor = 0; }
     if (!open && hoverFor > 0.35) open = true;
-    if (open && outFor > 0.6) open = false;
+    if (open && !held && outFor > 0.6) { open = false; sbDrag = null; }
     g.save();
     g.setTransform(1, 0, 0, 1, 0, 0);
     g.textBaseline = 'middle';
@@ -190,10 +202,13 @@ SDV.board = (() => {
   }
   // The open notice on screen (device px), for the app's click catcher; null when closed.
   const rect = () => (open && lastRect ? { ...lastRect } : null);
-  // A click on the notice (device px): ticks the to-do under it. True if one changed.
+  // The app's to-do form is open: keep its parent notice up until the form closes.
+  function hold(on) { held = Boolean(on); if (held) outFor = 0; }
+  // A click on the notice (device px): either edit or tick a to-do.
   function click(x, y) {
     const h = hits.find(r => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h);
     if (!h) return false;
+    if (h.kind === 'add' || h.kind === 'edit') { onEdit(h.id || null); return true; }
     const t = B.todos.find(x => x.id === h.id);
     if (!t) return false;
     t.done = !t.done;
@@ -202,6 +217,33 @@ SDV.board = (() => {
     renderPanel();
     checkTicks();
     onToggle(get());
+    return true;
+  }
+  // Press on the notice: grab the scrollbar, jump a page on its track, or click a row.
+  // Returns 'drag' when the thumb was grabbed so the caller can forward the drag.
+  function down(x, y) {
+    if (!open) return false;
+    if (sb && inBox(x, y, sb.track)) {
+      if (inBox(x, y, sb.thumb)) { sbDrag = { grab: y - sb.thumb.y }; return 'drag'; }
+      scroll = clampScroll(scroll + (y < sb.thumb.y ? -sb.visible : sb.visible), sb.max);
+      return true;
+    }
+    return click(x, y);
+  }
+  function drag(x, y) {
+    if (!sbDrag || !sb) return;
+    const range = Math.max(1, sb.track.h - sb.thumb.h);
+    const top = Math.min(sb.track.y + range, Math.max(sb.track.y, y - sbDrag.grab));
+    scroll = clampScroll(Math.round((top - sb.track.y) / range * sb.max), sb.max);
+  }
+  function up() { sbDrag = null; }
+  // Wheel over the notice (deltas in device px): one row per row height of travel.
+  function wheel(dx, dy, x, y) {
+    if (!open || !sb || !inBox(x, y, sb.area)) return false;
+    wheelAcc += dy;
+    const rowH = Math.max(8, sb.rowH);
+    const step = wheelAcc > 0 ? Math.floor(wheelAcc / rowH) : Math.ceil(wheelAcc / rowH);
+    if (step) { wheelAcc -= step * rowH; scroll = clampScroll(scroll + step, sb.max); }
     return true;
   }
 
@@ -479,17 +521,19 @@ SDV.board = (() => {
       if (P.status !== 'after' && L.digits && L.box) clockBox(g, L, value, cxL, Y(y + 21), s + Math.max(1, Math.round(k / 2)));
       else say(g, value, cxL, Y(y + 20), 22, k, { align: 'center' });
     }
-    // right note: today's to-dos, ticked with the game's checkbox
-    // kept in the order they were added, so a row never jumps away from under the cursor;
-    // only a list too long for the note puts the open ones first
-    const all = todos(date);
-    const list = all.length > 6 ? all.slice().sort((a, b) => Number(Boolean(a.done)) - Number(Boolean(b.done))) : all;
+    // right note: today's to-dos, ticked with the game's checkbox; a list too long
+    // for the note scrolls with the wheel or the little bar on its right
+    const list = todos(date);
     const done = list.filter(t => t.done).length;
     say(g, '今日待办', X(186), Y(44), 13, k);
-    if (list.length) say(g, `${done}/${list.length}`, X(311), Y(44), 12, k, { align: 'right', color: DIM, shadow: false });
+    if (list.length) say(g, `${done}/${list.length}`, X(288), Y(44), 12, k, { align: 'right', color: DIM, shadow: false });
+    say(g, '+', X(307), Y(44), 17, k, { align: 'center' });
+    hits.push({ kind: 'add', x: X(297), y: Y(35), w: 20 * s, h: 19 * s });
     g.fillStyle = '#e2c79a'; g.fillRect(X(186), Y(53), 126 * s, s);
-    const ROW = 17, FIRST = 59, MAXROWS = 6;
-    const shown = list.length > MAXROWS ? list.slice(0, MAXROWS - 1) : list;
+    const ROW = 17, FIRST = 59, VISIBLE = 6;
+    const rowH = ROW * s, maxScroll = Math.max(0, list.length - VISIBLE);
+    scroll = clampScroll(scroll, maxScroll);
+    const shown = list.slice(scroll, scroll + VISIBLE);
     shown.forEach((t, i) => {
       const ry = Y(FIRST + i * ROW), rh = ROW * s, rx = X(184), rw = 130 * s;
       const hov = cursor && cursor.x >= rx && cursor.x < rx + rw && cursor.y >= ry && cursor.y < ry + rh;
@@ -497,17 +541,28 @@ SDV.board = (() => {
       if (L.check) checkbox(g, L, t.done, X(187), ry + 4 * s, s);
       g.font = font(12.5, k, false);
       let txt = t.text;
-      const maxW = 110 * s;
+      const maxW = 89 * s;
       while (txt.length > 1 && g.measureText(txt).width > maxW) txt = txt.slice(0, -1);
       if (txt !== t.text) txt = txt.slice(0, -1) + '…';
       say(g, txt, X(202), ry + rh / 2, 12.5, k, { bold: false, color: t.done ? DIM : INK, shadow: !t.done });
       if (t.done) { g.fillStyle = DIM; g.fillRect(X(202), ry + rh / 2, g.measureText(txt).width, Math.max(1, Math.round(k))); }
-      hits.push({ x: rx, y: ry, w: rw, h: rh, id: t.id });
+      say(g, '✎', X(305), ry + rh / 2, 12, k, { align: 'center', color: DIM });
+      hits.push({ kind: 'toggle', x: rx, y: ry, w: 19 * s, h: rh, id: t.id });
+      hits.push({ kind: 'edit', x: X(295), y: ry, w: 21 * s, h: rh, id: t.id });
     });
-    if (list.length > shown.length) say(g, `还有 ${list.length - shown.length} 项…`, X(200), Y(FIRST + shown.length * ROW + 8), 11.5, k, { color: DIM, shadow: false, bold: false });
+    if (maxScroll) {
+      const tx = X(321), tw = 4 * s, ty = Y(FIRST), th = VISIBLE * ROW * s;
+      const thumbH = Math.max(12 * s, Math.round(th * VISIBLE / list.length));
+      const thumbY = ty + Math.round((th - thumbH) * scroll / maxScroll);
+      g.fillStyle = 'rgba(91,58,34,0.16)'; g.fillRect(tx, ty, tw, th);
+      g.fillStyle = '#8a5a33'; g.fillRect(tx, thumbY, tw, thumbH);
+      sb = { area: r, rowH, visible: VISIBLE, max: maxScroll,
+        // the hit strips are wider than the 4-texel bar so it can be grabbed easily
+        track: { x: tx - 2 * s, y: ty, w: 10 * s, h: th }, thumb: { x: tx - 2 * s, y: thumbY, w: 10 * s, h: thumbH } };
+    }
     const foot = !list.length ? '还没有待办' : done === list.length ? '都做完啦 ✨' : '点一下就能勾掉';
     say(g, foot, X(249), Y(!list.length ? 100 : 160), !list.length ? 13 : 11, k, { align: 'center', color: DIM, shadow: false, bold: !list.length });
-    if (!list.length) say(g, '在叶子菜单或设置窗口里添加', X(249), Y(118), 11, k, { align: 'center', color: DIM, shadow: false, bold: false });
+    if (!list.length) say(g, '点右上角 + 添加', X(249), Y(118), 11, k, { align: 'center', color: DIM, shadow: false, bold: false });
     return r;
   }
 
@@ -552,11 +607,12 @@ SDV.board = (() => {
     }
     const done = list.filter(t => t.done).length;
     rows.push(['head', list.length ? `今日待办  ${done}/${list.length}` : '今日待办']);
-    const shown = (list.length > 8 ? list.slice().sort((a, b) => Number(Boolean(a.done)) - Number(Boolean(b.done))) : list).slice(0, 8);
-    if (!list.length) rows.push(['hint', '还没有待办 · 在叶子菜单或设置窗口里添加']);
+    const VISIBLE = 8, maxScroll = Math.max(0, list.length - VISIBLE);
+    scroll = clampScroll(scroll, maxScroll);
+    const shown = list.slice(scroll, scroll + VISIBLE);
+    if (!list.length) rows.push(['hint', '还没有待办 · 点右上角 + 添加']);
     for (const t of shown) rows.push(['todo', t.text, t.done, t.id]);
-    if (list.length > shown.length) rows.push(['hint', `还有 ${list.length - shown.length} 项…`]);
-    else if (list.length && done === list.length) rows.push(['hint', '今天的事都做完啦 ✨']);
+    if (list.length && done === list.length) rows.push(['hint', '今天的事都做完啦 ✨']);
 
     const padX = 14 * k, padY = 12 * k;
     const H_ = { title: 22, kv: 22, bar: 12, head: 26, todo: 20, hint: 20 };
@@ -588,6 +644,8 @@ SDV.board = (() => {
         g.strokeStyle = C.line; g.lineWidth = 1 * k;
         g.beginPath(); g.moveTo(x0, y + 4 * k); g.lineTo(x1, y + 4 * k); g.stroke();
         g.font = font(12, k, true); g.fillStyle = C.ink; g.fillText(a, x0, cy + 3 * k);
+        g.textAlign = 'right'; g.fillText('+', x1, cy + 3 * k); g.textAlign = 'left';
+        hits.push({ kind: 'add', x: x1 - 20 * k, y, w: 22 * k, h: rh });
       } else if (kind === 'todo') {
         const bx = x0, bs = 11 * k, by = cy - bs / 2;
         g.strokeStyle = C.edge; g.lineWidth = 1.5 * k; g.strokeRect(bx, by, bs, bs);
@@ -596,33 +654,98 @@ SDV.board = (() => {
           g.beginPath(); g.moveTo(bx + 2 * k, by + 5.5 * k); g.lineTo(bx + 4.5 * k, by + 8.5 * k); g.lineTo(bx + 9.5 * k, by + 2 * k); g.stroke();
         }
         g.font = font(12, k); g.fillStyle = b ? C.dim : C.ink;
-        const t = clip(a, x1 - bx - 20 * k);
-        if (style) hits.push({ x: x0, y, w: x1 - x0, h: rh, id: style });
+        const t = clip(a, x1 - bx - 38 * k);
+        if (style) {
+          hits.push({ kind: 'toggle', x: x0, y, w: 17 * k, h: rh, id: style });
+          hits.push({ kind: 'edit', x: x1 - 22 * k, y, w: 22 * k, h: rh, id: style });
+        }
         g.fillText(t, bx + 20 * k, cy);
+        g.textAlign = 'right'; g.fillText('✎', x1, cy); g.textAlign = 'left';
         if (b) { const tw = g.measureText(t).width; g.fillRect(bx + 20 * k, cy, tw, 1 * k); }
       } else if (kind === 'hint') { g.font = font(11.5, k); g.fillStyle = C.dim; g.fillText(a, x0, cy); }
       y += rh;
+    }
+    if (maxScroll) {
+      const first = rows.findIndex(row => row[0] === 'todo');
+      if (first >= 0) {
+        const top = r.y + padY + rows.slice(0, first).reduce((s, row) => s + H_[row[0]] * k, 0);
+        const th = shown.length * H_.todo * k, tx = x1 + 7 * k, tw = 3 * k;
+        const thumbH = Math.max(12 * k, Math.round(th * VISIBLE / list.length));
+        const thumbY = top + Math.round((th - thumbH) * scroll / maxScroll);
+        g.fillStyle = 'rgba(91,58,34,0.16)'; g.fillRect(tx, top, tw, th);
+        g.fillStyle = C.dim; g.fillRect(tx, thumbY, tw, thumbH);
+        sb = { area: r, rowH: H_.todo * k, visible: VISIBLE, max: maxScroll,
+          // a little wider than the 3 px bar, for an easy grab (stays off the ✎ buttons)
+          track: { x: tx - 2 * k, y: top, w: 8 * k, h: th }, thumb: { x: tx - 2 * k, y: thumbY, w: 8 * k, h: thumbH } };
+      }
     }
     return r;
   }
 
   // ---------- settings window: edit to-dos and pay ----------
   let ui = null, onChange = () => {};
+  let editingId = null;
+  let recordingHotkey = false;
   const $ = id => document.getElementById(id);
   const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
+  function keyName(h) {
+    if (h.key && h.key.length === 1) return h.key.toUpperCase();
+    if (h.code && /^Key[A-Z]$/.test(h.code)) return h.code.slice(3);
+    if (h.code && /^Digit[0-9]$/.test(h.code)) return h.code.slice(5);
+    if (h.code && /^F\d{1,2}$/.test(h.code)) return h.code;
+    const named = { Space: '空格', Enter: '回车', Escape: 'Esc', Backspace: '退格', Delete: '删除',
+      ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' };
+    return named[h.code] || h.key || h.code || '?';
+  }
+  function hotkeyLabel(h) {
+    if (!h) return '点击设置快捷键';
+    const parts = [];
+    if (isMac) {
+      if (h.ctrl) parts.push('⌃');
+      if (h.alt) parts.push('⌥');
+      if (h.shift) parts.push('⇧');
+      if (h.meta) parts.push('⌘');
+      return parts.join('') + keyName(h);
+    }
+    if (h.ctrl) parts.push('Ctrl');
+    if (h.alt) parts.push('Alt');
+    if (h.shift) parts.push('Shift');
+    if (h.meta) parts.push('Win');
+    return parts.concat(keyName(h)).join('+');
+  }
+  function renderHotkey() {
+    if (!ui || !$('todo-hotkey')) return;
+    $('todo-hotkey').textContent = recordingHotkey ? '请按下组合键…' : hotkeyLabel(B.todoHotkey);
+    $('todo-hotkey-clear').hidden = recordingHotkey || !B.todoHotkey;
+  }
   function changed() { spriteKey = ''; renderPanel(); checkTicks(); onChange(get()); }
+  function openTodo(id) {
+    openPanel(true);
+    editingId = id;
+    const t = B.todos.find(x => x.id === id);
+    $('todo-text').value = t ? t.text : '';
+    $('todo-add').textContent = t ? '保存' : '添加';
+    $('todo-text').focus();
+  }
 
   function bindPanel(cb) {
     onChange = cb || onChange;
     onToggle = onChange;
     if (!$('board-panel')) return;
     ui = true;
+    if (window.SDV_HOST) $('todo-text').hidden = true;
     if ($('board-open')) $('board-open').addEventListener('click', () => openPanel(!$('board-panel').classList.contains('on')));
     const add = () => {
+      if (window.SDV_HOST) { onEdit(null); return; }
       const t = $('todo-text').value.trim();
       if (!t) return;
-      B.todos.push({ id: newId(), text: t.slice(0, 40), done: false });
+      const existing = B.todos.find(x => x.id === editingId);
+      if (existing) existing.text = t.slice(0, 40);
+      else B.todos.push({ id: newId(), text: t.slice(0, 40), done: false });
+      editingId = null;
       $('todo-text').value = '';
+      $('todo-add').textContent = '添加';
       changed();
     };
     $('todo-add').addEventListener('click', add);
@@ -633,6 +756,7 @@ SDV.board = (() => {
       const t = B.todos.find(x => x.id === li.dataset.id);
       if (!t) return;
       if (e.target.matches('.del')) B.todos = B.todos.filter(x => x !== t);
+      else if (e.target.matches('.edit')) { onEdit(t.id); return; }
       else if (e.target.matches('input[type=checkbox]')) { t.done = e.target.checked; t.doneDay = t.done ? dayKey(new Date()) : undefined; }
       else return;
       changed();
@@ -653,8 +777,27 @@ SDV.board = (() => {
       B.pay.days = [...s].sort();
       changed();
     });
-    for (const [id, key] of [['board-show', 'show'], ['board-money', 'showMoney'], ['board-remind', 'remind'], ['board-sound', 'sound']]) {
+    for (const [id, key] of [['board-show', 'show'], ['board-money', 'showMoney'], ['board-remind', 'remind'],
+      ['board-sound', 'sound'], ['board-reminder-sound', 'reminderSound']]) {
       $(id).addEventListener('change', () => { B[key] = $(id).checked; changed(); });
+    }
+    if ($('todo-hotkey')) {
+      const hotkeyBtn = $('todo-hotkey');
+      hotkeyBtn.addEventListener('click', () => { recordingHotkey = true; renderHotkey(); });
+      $('todo-hotkey-clear').addEventListener('click', () => { B.todoHotkey = null; renderHotkey(); changed(); });
+      if (isMac) $('todo-hotkey-hint').textContent += '；首次使用需在「系统设置 › 隐私与安全性 › 辅助功能」中允许本应用';
+      document.addEventListener('keydown', e => {
+        if (!recordingHotkey) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === 'Escape') { recordingHotkey = false; renderHotkey(); return; }
+        if (['Meta', 'Control', 'Alt', 'Shift'].includes(e.key)) return;
+        if (!e.metaKey && !e.ctrlKey && !e.altKey) { hotkeyBtn.textContent = '需包含 Ctrl / Alt / ⌘ / ⌥'; return; }
+        B.todoHotkey = { code: e.code, keyCode: e.keyCode, key: e.key, meta: e.metaKey, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey };
+        recordingHotkey = false;
+        renderHotkey();
+        changed();
+      });
     }
     renderPanel();
   }
@@ -676,8 +819,15 @@ SDV.board = (() => {
       li.className = t.done ? 'done' : '';
       const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = t.done;
       const sp = document.createElement('span'); sp.textContent = t.text;
+      if (t.reminder) {
+        const d = new Date(t.reminder.at);
+        const date = document.createElement('small');
+        date.textContent = `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        sp.append(' ', date);
+      }
+      const edit = document.createElement('button'); edit.className = 'edit'; edit.textContent = '✎'; edit.title = '编辑待办';
       const del = document.createElement('button'); del.className = 'del'; del.textContent = '×'; del.title = '删掉';
-      li.append(cb, sp, del);
+      li.append(cb, sp, edit, del);
       list.appendChild(li);
     }
     if (!items.length) { const li = document.createElement('li'); li.className = 'empty'; li.textContent = '还没有待办'; list.appendChild(li); }
@@ -693,6 +843,8 @@ SDV.board = (() => {
     document.querySelectorAll('#pay-days [data-day]').forEach(b => b.setAttribute('aria-pressed', String(B.pay.days.includes(Number(b.dataset.day)))));
     $('board-show').checked = B.show; $('board-money').checked = B.showMoney; $('board-remind').checked = B.remind;
     if ($('board-sound')) $('board-sound').checked = B.sound;
+    $('board-reminder-sound').checked = B.reminderSound;
+    renderHotkey();
     previewLine();
   }
   function previewLine() {
@@ -707,5 +859,7 @@ SDV.board = (() => {
     $('pay-preview').textContent = t;
   }
 
-  return { set, get, image, draw, rect, click, onToggle: cb => { onToggle = cb; }, onTicked: cb => { onTicked = cb; }, pay, compactLines, bindPanel, openPanel, previewLine, shown: () => B.show, dayKey };
+  return { set, get, image, draw, rect, click, down, drag, up, wheel, hold,
+    onToggle: cb => { onToggle = cb; }, onEdit: cb => { onEdit = cb; },
+    onTicked: cb => { onTicked = cb; }, pay, compactLines, bindPanel, openPanel, openTodo, previewLine, shown: () => B.show, dayKey };
 })();

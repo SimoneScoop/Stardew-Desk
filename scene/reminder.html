@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>待办提醒</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; color: #3a2414;
+    font: 14px/1.45 "PingFang SC", "Microsoft YaHei UI", sans-serif; }
+  main { margin: 4px; padding: 12px; border: 3px solid #6b4226; border-radius: 8px;
+    background: #f7e2b5; box-shadow: 0 5px 18px #0006; }
+  header { display: flex; align-items: center; gap: 8px; font-weight: bold; }
+  canvas { width: 48px; height: 48px; image-rendering: pixelated; flex: none; }
+  ul { margin: 8px 0; padding-left: 22px; max-height: 96px; overflow-y: auto; overflow-wrap: anywhere; }
+  li { margin: 2px 0; }
+  footer { display: flex; justify-content: flex-end; gap: 6px; align-items: center; }
+  button, select { border: 1px solid #8a5a33; border-radius: 4px; padding: 5px 7px;
+    background: #e2c48e; color: inherit; font: inherit; cursor: pointer; }
+  #ack { background: #8a5a33; color: #fff5dc; }
+</style>
+</head>
+<body>
+<main>
+  <header><canvas id="pet" width="32" height="32"></canvas><span>有待办要记得哦</span></header>
+  <ul id="items"></ul>
+  <footer><select id="delay" aria-label="稍后提醒时间"><option value="5">5 分钟后</option>
+    <option value="10" selected>10 分钟后</option><option value="30">30 分钟后</option></select>
+    <button id="snooze">稍后提醒</button><button id="ack">知道了</button></footer>
+</main>
+<script>
+  const post = body => window.webkit.messageHandlers.sdv.postMessage(body);
+  let shownPet = '';
+  function pet(id) {
+    if (id === shownPet) return;
+    shownPet = id;
+    const canvas = document.getElementById('pet'), g = canvas.getContext('2d');
+    const img = new Image();
+    if (!id || id === 'none') {
+      const frames = [25, 45, 128, 132, 136];
+      const n = frames[Math.floor(Math.random() * frames.length)];
+      const small = n >= 128, size = small ? 16 : 32;
+      img.src = 'data/img/critters.png';
+      img.onload = () => { g.clearRect(0, 0, 32, 32); g.drawImage(img,
+        (n % (small ? 20 : 10)) * size, Math.floor(n / (small ? 20 : 10)) * size, size, size,
+        small ? 8 : 0, small ? 8 : 0, size, size); };
+    } else {
+      const dog = id.startsWith('dog'), frame = dog ? 24 : 17;
+      img.src = `data/img/pet_${id}.png`;
+      img.onload = () => { g.clearRect(0, 0, 32, 32);
+        g.drawImage(img, (frame % 4) * 32, Math.floor(frame / 4) * 32, 32, 32, 0, 0, 32, 32); };
+    }
+  }
+  window.SDV = { reminderView: { update(data) {
+    pet(data.pet);
+    const list = document.getElementById('items');
+    list.replaceChildren();
+    data.todos.forEach(t => { const li = document.createElement('li'); li.textContent = t.text; list.appendChild(li); });
+  } } };
+  document.getElementById('ack').onclick = () => post({ type: 'reminderAction', kind: 'ack' });
+  document.getElementById('snooze').onclick = () => post({ type: 'reminderAction', kind: 'snooze', minutes: Number(document.getElementById('delay').value) });
+  post({ type: 'hello' });
+</script>
+</body>
+</html>

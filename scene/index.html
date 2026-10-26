@@ -27,6 +27,7 @@
   #panel h1 { font-size: 13px; margin: 0 0 8px; color: var(--accent); letter-spacing: .5px; }
   .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
   .row > span { color: var(--ink-dim); width: 40px; flex: none; }
+  .row > span.nowrap { width: auto; white-space: nowrap; }
   button {
     font: inherit; color: var(--ink); background: #5b3a22; border: 1px solid #8a5a33;
     border-radius: 4px; padding: 2px 8px; cursor: pointer;
@@ -58,6 +59,7 @@
   #todo-list { list-style: none; margin: 4px 0; padding: 0; max-height: 168px; overflow-y: auto; }
   #todo-list li { display: flex; gap: 6px; align-items: center; padding: 1px 0; }
   #todo-list li span { flex: 1; overflow-wrap: anywhere; }
+  #todo-list li small { color: var(--ink-dim); font-size: 10px; }
   #todo-list li.done span { color: var(--ink-dim); text-decoration: line-through; }
   #todo-list li.empty { color: var(--ink-dim); }
   #todo-list .del { padding: 0 6px; line-height: 1.3; }
@@ -145,6 +147,9 @@
       </div>
       <div class="row"><label><input id="board-sound" type="checkbox"> 音效</label></div>
       <div class="hint">打勾时游戏里的「叮」，下班时的收获声</div>
+      <div class="row"><label><input id="board-reminder-sound" type="checkbox"> 待办提醒声音</label></div>
+      <div class="row"><span class="nowrap">新建待办</span><button id="todo-hotkey">点击设置快捷键</button><button id="todo-hotkey-clear" hidden>清除</button></div>
+      <div class="hint" id="todo-hotkey-hint">点按钮后按下组合键（需包含 Ctrl / Alt / ⌘ / ⌥ 之一）</div>
       <div class="row"><label><input id="board-show" type="checkbox"> 在农场里放公告板</label></div>
       <div class="hint">鼠标在桌面的公告板上停一下会展开；位置在「调整布局」里拖</div>
     </div>
