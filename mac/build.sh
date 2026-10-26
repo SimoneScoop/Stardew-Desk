@@ -29,9 +29,14 @@ R="$APP/Contents/Resources"
 # our own icon (mac/AppIcon.icns) instead of the script-applet scroll
 cp mac/AppIcon.icns "$R/applet.icns"
 put CFBundleIconFile string applet
+# osacompile also ships an asset-catalog icon called "applet" and points CFBundleIconName
+# at it; macOS prefers the catalog over CFBundleIconFile, which showed the generic
+# script-applet icon even though applet.icns was ours. Drop the key so the .icns wins.
+$PB -c "Delete :CFBundleIconName" "$PLIST" 2>/dev/null || true
 mkdir -p "$R/scene"
 cp scene/*.html scene/*.js "$R/scene/"
 cp -R scene/lib "$R/scene/lib"
 cp mac/musicx.js "$R/musicx.js"
+xattr -cr "$APP" 2>/dev/null || true     # Finder/quarantine detritus breaks the seal
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
 touch "$APP"   # let Finder and the Dock pick up the new icon
